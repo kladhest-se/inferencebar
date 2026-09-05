@@ -1,0 +1,16 @@
+# Swift build products
+.build/
+outputs/
+
+# Xcode / SwiftPM caches used by the Makefile
+work/clang-cache/
+work/swift-cache/
+work/package/
+work/dmg/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
