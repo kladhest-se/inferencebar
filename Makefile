@@ -81,6 +81,14 @@ macos-app: all
 	cp Assets/AppIcons/AppIcon.icns "$(APP_CONTENTS)/Resources/AppIcon.icns"
 	cp Assets/Credits.rtf LICENSE LICENSE.md "$(APP_CONTENTS)/Resources/"
 	cp .build/release/inference-cli "$(APP_CONTENTS)/Resources/inference"
+	# codesign --deep below only re-signs nested *bundles* (frameworks,
+	# plug-ins, the main executable) -- a loose executable dropped into
+	# Resources/ isn't one, so it's skipped and keeps whatever unsigned
+	# build-time signature swift build left on it. Notarization rejects
+	# that with "not signed with a valid Developer ID certificate", "no
+	# secure timestamp", and "hardened runtime not enabled", all at
+	# once, so it has to be signed explicitly first.
+	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" "$(APP_CONTENTS)/Resources/inference"
 	codesign --force --deep --options runtime --sign "$(CODESIGN_IDENTITY)" "$(APP_DIR)"
 	codesign --verify --deep --strict --verbose=2 "$(APP_DIR)"
 
