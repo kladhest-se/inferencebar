@@ -114,7 +114,7 @@
         <div class="card">
           <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg></div>
           <h3>Scriptable from the terminal</h3>
-          <p>A tiny <code>inferencebar</code> command-line tool pipes one-off prompts to whatever profile is running — install it with one click from Settings.</p>
+          <p>A tiny <code>inference</code> command-line tool pipes one-off prompts to whatever profile is running — install it with one click from Settings.</p>
         </div>
       </div>
     </div>

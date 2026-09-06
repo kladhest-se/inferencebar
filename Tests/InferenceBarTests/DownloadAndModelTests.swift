@@ -41,6 +41,14 @@ final class DownloadAndModelTests: XCTestCase {
         XCTAssertFalse(CLIInstallPolicy.isOnPATH("/Users/alex/.local/bin", pathEnvironmentVariable: ""))
     }
 
+    func testCLIInstallPolicySystemDirectoryIsTheStockMacOSDefault() {
+        // /usr/local/bin is on every standard login shell's PATH out of
+        // the box (see /etc/paths) with no profile edits needed -- the
+        // preferred install target, tried before Homebrew's own bin.
+        XCTAssertEqual(CLIInstallPolicy.systemDirectory, "/usr/local/bin")
+        XCTAssertTrue(CLIInstallPolicy.isOnPATH(CLIInstallPolicy.systemDirectory, pathEnvironmentVariable: "/usr/local/bin:/usr/bin:/bin"))
+    }
+
     func testLegacyChatsDecodeWithAStoppedZeroDuration() throws {
         let json = #"{"id":"00000000-0000-0000-0000-000000000001","title":"Old chat","projectID":null,"messages":[],"updatedAt":0}"#.data(using: .utf8)!
         let decoder = JSONDecoder()
@@ -111,6 +119,16 @@ final class DownloadAndModelTests: XCTestCase {
         XCTAssertEqual(ChatComposerSizing.height(for: "hello"), 44)
         XCTAssertGreaterThan(ChatComposerSizing.height(for: String(repeating: "x", count: 220)), 44)
         XCTAssertEqual(ChatComposerSizing.height(for: String(repeating: "line\n", count: 100)), 220)
+    }
+
+    func testChatColumnLayoutScalesWithViewportButStaysWithinBounds() {
+        // Narrow window: floors at the previous fixed width, never narrower.
+        XCTAssertEqual(ChatColumnLayout.maxWidth(forViewportWidth: 500), 760)
+        // Mid-size window: tracks the viewport minus the side margin.
+        XCTAssertEqual(ChatColumnLayout.maxWidth(forViewportWidth: 1000), 920)
+        // Very wide window: caps at the maximum reading width instead of
+        // stretching prose edge to edge.
+        XCTAssertEqual(ChatColumnLayout.maxWidth(forViewportWidth: 2500), 1200)
     }
 
     func testGenericAPIAliasDoesNotLeakIntoChatDisplayName() {
@@ -344,6 +362,16 @@ final class DownloadAndModelTests: XCTestCase {
         XCTAssertNil(MultimodalProjector.projectorFilename(forModel: "mmproj-model.gguf", siblingFilenames: ["mmproj-model.gguf"]))
     }
 
+    func testHasProjectorSiblingDetectsAnMmprojFileRegardlessOfHuggingFaceTags() {
+        // The whole point of this check: it looks at the repo's actual
+        // files, not any pipeline_tag Hugging Face happens to carry --
+        // a GGUF requant repo tagged just "text-generation" still counts
+        // if it ships an mmproj file alongside the model.
+        XCTAssertTrue(MultimodalProjector.hasProjectorSibling(among: ["Qwen3VL-32B-Instruct-Q4_K_M.gguf", "mmproj-Qwen3VL-32B-Instruct-Q8_0.gguf", "README.md"]))
+        XCTAssertFalse(MultimodalProjector.hasProjectorSibling(among: ["Qwen3-32B-Q4_K_M.gguf", "README.md"]))
+        XCTAssertFalse(MultimodalProjector.hasProjectorSibling(among: ["mmproj-notes.txt"]))
+    }
+
     func testMultimodalProjectorPicksDeterministicallyWhenMultipleCandidatesExist() {
         XCTAssertEqual(
             MultimodalProjector.projectorFilename(forModel: "model.gguf", siblingFilenames: ["model.gguf", "mmproj-f32.gguf", "mmproj-f16.gguf"]),
@@ -364,17 +392,15 @@ final class DownloadAndModelTests: XCTestCase {
     }
 
     func testMultimodalProjectorPathStillFindsItsProjectorWithOtherModelsInTheSameFolder() throws {
-        // NOTE: matching is directory-scoped, not name-tied to a specific
-        // model -- a real .gguf file that isn't the projector's own model
-        // is only excluded by not being named "mmproj*", not by any check
-        // that it "belongs" to this particular model. That's a deliberate
-        // simplification (see testMultimodalProjectorPicksDeterministicallyWhenMultipleCandidatesExist,
-        // which relies on projector filenames often being fully generic,
-        // e.g. "mmproj-f16.gguf", with no relation to the model's own
-        // name at all) -- so a *second* GGUF model dropped in the same
-        // flat model folder does not itself get excluded from matching an
-        // unrelated projector. All this test guards is that an unrelated
-        // model file's mere presence doesn't break the correct pairing.
+        // Matching is directory-scoped (not restricted to files that
+        // literally reference each other) but IS family-tied: a
+        // generically-named projector like "mmproj-f16.gguf" still
+        // matches any model (see
+        // testMultimodalProjectorPicksDeterministicallyWhenMultipleCandidatesExist),
+        // but here the projector's own name carries the same family
+        // tokens as its model ("qwen3-vl"), so an unrelated second GGUF
+        // file sitting in the same flat model folder must not interfere
+        // with that pairing.
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -385,6 +411,125 @@ final class DownloadAndModelTests: XCTestCase {
         try Data([0]).write(to: projector)
         try Data([0]).write(to: textOnlyModel)
         XCTAssertEqual(MultimodalProjector.path(forModelPath: visionModel.path), projector.path)
+    }
+
+    func testMultimodalProjectorRefusesAnUnrelatedModelFamilysProjector() throws {
+        // Regression test for a real crash: once this app's preset
+        // auto-download (see ProfilePreset.mmprojFilename) fetched
+        // Qwen3-VL 32B's real mmproj file into the shared, flat
+        // ~/ai-models folder, starting a completely unrelated profile
+        // -- plain Qwen 3.6 35B, a text-only model that was already
+        // sitting in that same folder -- also got that Qwen3-VL 32B
+        // projector wired up as its --mmproj, because the original
+        // matching rule was "any mmproj file in the directory". That
+        // mismatched a 2048-dim text model against a 20480-dim
+        // projector and llama-server aborted outright (GGML_ASSERT)
+        // instead of just declining images. Family-token matching (see
+        // MultimodalProjector.projectorFilename) must reject this pairing.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let textOnlyModel = root.appendingPathComponent("Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf")
+        let unrelatedProjector = root.appendingPathComponent("mmproj-Qwen3VL-32B-Instruct-F16.gguf")
+        let visionModel = root.appendingPathComponent("Qwen3VL-32B-Instruct-Q4_K_M.gguf")
+        try Data([0]).write(to: textOnlyModel)
+        try Data([0]).write(to: unrelatedProjector)
+        try Data([0]).write(to: visionModel)
+        XCTAssertNil(MultimodalProjector.path(forModelPath: textOnlyModel.path), "a text-only model must never be wired up with an unrelated model family's projector")
+        XCTAssertEqual(MultimodalProjector.path(forModelPath: visionModel.path), unrelatedProjector.path, "the vision model this projector actually belongs to must still find it")
+    }
+
+    func testMultimodalProjectorRejectsSameFamilyDifferentSizeProjector() {
+        // Same model family, different size tier -- Qwen3-VL 8B must not
+        // pick up the 32B projector (or vice versa) even though both
+        // names share "qwen3vl"/"instruct".
+        XCTAssertNil(MultimodalProjector.projectorFilename(
+            forModel: "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+            siblingFilenames: ["Qwen3VL-8B-Instruct-Q4_K_M.gguf", "mmproj-Qwen3VL-32B-Instruct-F16.gguf"]
+        ))
+    }
+
+    func testOpenCodeConfigSyncBuildsTheInferenceBarProviderEntry() throws {
+        let profiles = [
+            OpenCodeConfigSync.ProfileEntry(alias: "gemma-4-8b", name: "Gemma 4 8B (Coding)", contextSize: 32768, maximumOutputTokens: 8192)
+        ]
+        let merged = OpenCodeConfigSync.mergedConfig(existing: [:], baseURL: "http://127.0.0.1:8080/v1", apiKey: "local", profiles: profiles)
+        XCTAssertEqual(merged["$schema"] as? String, "https://opencode.ai/config.json")
+        let providers = try XCTUnwrap(merged["provider"] as? [String: Any])
+        let inferencebar = try XCTUnwrap(providers[OpenCodeConfigSync.providerID] as? [String: Any])
+        XCTAssertEqual(inferencebar["npm"] as? String, "@ai-sdk/openai-compatible")
+        let options = try XCTUnwrap(inferencebar["options"] as? [String: Any])
+        XCTAssertEqual(options["baseURL"] as? String, "http://127.0.0.1:8080/v1")
+        XCTAssertEqual(options["apiKey"] as? String, "local")
+        let models = try XCTUnwrap(inferencebar["models"] as? [String: Any])
+        let model = try XCTUnwrap(models["gemma-4-8b"] as? [String: Any])
+        XCTAssertEqual(model["name"] as? String, "Gemma 4 8B (Coding)")
+        let limit = try XCTUnwrap(model["limit"] as? [String: Any])
+        XCTAssertEqual(limit["context"] as? Int, 32768)
+        XCTAssertEqual(limit["output"] as? Int, 8192)
+    }
+
+    func testOpenCodeConfigSyncPreservesUnrelatedExistingConfigAndOverwritesOnlyItsOwnProvider() throws {
+        let existing: [String: Any] = [
+            "$schema": "https://opencode.ai/config.json",
+            "theme": "dark",
+            "provider": [
+                "anthropic": ["npm": "@ai-sdk/anthropic"],
+                OpenCodeConfigSync.providerID: ["npm": "stale-entry-from-before"]
+            ]
+        ]
+        let profiles = [OpenCodeConfigSync.ProfileEntry(alias: "qwen3.6-27b", name: "Qwen 3.6 27B", contextSize: 65536, maximumOutputTokens: 4096)]
+        let merged = OpenCodeConfigSync.mergedConfig(existing: existing, baseURL: "http://127.0.0.1:8080/v1", apiKey: "{env:INFERENCE_API_KEY}", profiles: profiles)
+        XCTAssertEqual(merged["theme"] as? String, "dark")
+        let providers = try XCTUnwrap(merged["provider"] as? [String: Any])
+        XCTAssertNotNil(providers["anthropic"], "an unrelated provider a person configured by hand must survive the merge")
+        let inferencebar = try XCTUnwrap(providers[OpenCodeConfigSync.providerID] as? [String: Any])
+        XCTAssertEqual(inferencebar["npm"] as? String, "@ai-sdk/openai-compatible", "re-syncing must overwrite the stale inferencebar entry, not merge into it")
+        let options = try XCTUnwrap(inferencebar["options"] as? [String: Any])
+        XCTAssertEqual(options["apiKey"] as? String, "{env:INFERENCE_API_KEY}")
+    }
+
+    func testOpenCodeConfigSyncSetsTopLevelModelFieldForTheDefaultCodingProfile() throws {
+        let profiles = [
+            OpenCodeConfigSync.ProfileEntry(alias: "gemma-4-8b", name: "Gemma 4 8B", contextSize: 32768, maximumOutputTokens: 8192),
+            OpenCodeConfigSync.ProfileEntry(alias: "qwen3.6-35b", name: "Qwen 3.6 35B", contextSize: 131072, maximumOutputTokens: 8192)
+        ]
+        let merged = OpenCodeConfigSync.mergedConfig(existing: [:], baseURL: "http://127.0.0.1:8080/v1", apiKey: "local", profiles: profiles, defaultModelAlias: "qwen3.6-35b")
+        XCTAssertEqual(merged["model"] as? String, "inferencebar/qwen3.6-35b")
+    }
+
+    func testOpenCodeConfigSyncClearsItsOwnStaleDefaultButLeavesAnotherProvidersModelAlone() {
+        // No defaultModelAlias this time (the person cleared their default
+        // coding profile) -- a "model" this sync previously set (the
+        // "inferencebar/" prefix) must be removed, but a "model" pointing
+        // at some other provider is someone else's setting, not ours to
+        // touch.
+        let ourStaleDefault = OpenCodeConfigSync.mergedConfig(
+            existing: ["model": "inferencebar/old-alias"],
+            baseURL: "http://127.0.0.1:8080/v1", apiKey: "local",
+            profiles: [OpenCodeConfigSync.ProfileEntry(alias: "gemma-4-8b", name: "Gemma 4 8B", contextSize: 32768, maximumOutputTokens: 8192)]
+        )
+        XCTAssertNil(ourStaleDefault["model"])
+
+        let someoneElsesDefault = OpenCodeConfigSync.mergedConfig(
+            existing: ["model": "anthropic/claude-sonnet-4-5"],
+            baseURL: "http://127.0.0.1:8080/v1", apiKey: "local",
+            profiles: [OpenCodeConfigSync.ProfileEntry(alias: "gemma-4-8b", name: "Gemma 4 8B", contextSize: 32768, maximumOutputTokens: 8192)]
+        )
+        XCTAssertEqual(someoneElsesDefault["model"] as? String, "anthropic/claude-sonnet-4-5")
+    }
+
+    func testChatImageAttachmentPolicyBlocksLlamaCPPWithoutAProjector() {
+        XCTAssertTrue(ChatImageAttachmentPolicy.blocksImageAttachment(runtime: .llamaCPP, hasProjector: false))
+        XCTAssertFalse(ChatImageAttachmentPolicy.blocksImageAttachment(runtime: .llamaCPP, hasProjector: true))
+    }
+
+    func testChatImageAttachmentPolicyNeverBlocksMLXOrVLLM() {
+        // InferenceBar doesn't wire up --mmproj for these backends at all,
+        // so "no projector detected" isn't a meaningful signal for them --
+        // they may still support vision input on their own.
+        XCTAssertFalse(ChatImageAttachmentPolicy.blocksImageAttachment(runtime: .mlxLM, hasProjector: false))
+        XCTAssertFalse(ChatImageAttachmentPolicy.blocksImageAttachment(runtime: .vllmMLX, hasProjector: false))
     }
 
     func testChatImageAttachmentPolicyLeavesSmallImagesUnchanged() {
@@ -502,6 +647,75 @@ final class DownloadAndModelTests: XCTestCase {
         }
     }
 
+    func testVisionChatCategoryTargetsImageTextPipelineWithoutNarrowingChatPicks() {
+        // Only the new vision-specific category asks for image-capable
+        // models; the original "Chat Picks" category stays exactly as
+        // broad as before (no pipelineTag), so it keeps recommending its
+        // existing text-only picks too.
+        XCTAssertEqual(ModelCategory.recommendedVisionChat.pipelineTag, "image-text-to-text")
+        XCTAssertNil(ModelCategory.recommendedChat.pipelineTag)
+    }
+
+    func testDownloadSourceModelIDResolvesGGUFAndMLXPresetsDifferently() {
+        // GGUF: only presets with a confirmed source repo can
+        // auto-download -- an unconfirmed one deliberately stays nil
+        // rather than guessing at a repo/filename that might not match.
+        let confirmedGGUF = ProfilePreset.all.first(where: { $0.id == "gguf-qwen3-vl-32b-q4-48" })
+        XCTAssertEqual(confirmedGGUF?.downloadSourceModelID, "Qwen/Qwen3-VL-32B-Instruct-GGUF")
+        XCTAssertEqual(confirmedGGUF?.expectedGGUFFilename, "Qwen3VL-32B-Instruct-Q4_K_M.gguf")
+        // Llama 3.3 70B's Q6_K/Q8_0 quants are the one case that stays
+        // unconfirmed on purpose: every quantizer ships them pre-split
+        // into two files (over Hugging Face's single-file comfort
+        // limit), and download(file:from:to:ownerProfileID:) only
+        // fetches one flat filename, so it can't auto-download either
+        // half.
+        let splitFileGGUF = ProfilePreset.all.first(where: { $0.id == "llama70-128-ultra-pro" })
+        XCTAssertNotNil(splitFileGGUF)
+        XCTAssertNil(splitFileGGUF?.ggufSourceModelID)
+        XCTAssertNil(splitFileGGUF?.downloadSourceModelID)
+        XCTAssertEqual(splitFileGGUF?.expectedGGUFFilename, "Llama-3.3-70B-Instruct-Q6_K-00001-of-00002.gguf")
+        // MLX/vLLM-MLX: modelPath already *is* the Hugging Face repo ID,
+        // so downloadSourceModelID always resolves without needing its
+        // own ggufSourceModelID.
+        let mlxPreset = ProfilePreset.all.first(where: { $0.id == "mlx-qwen36-m3max-48" })
+        XCTAssertEqual(mlxPreset?.downloadSourceModelID, "mlx-community/Qwen3.6-35B-A3B-4bit")
+        XCTAssertNil(mlxPreset?.expectedGGUFFilename)
+    }
+
+    func testFormerlyUnconfirmedGGUFPresetsNowResolveAConfirmedSourceRepo() {
+        // These were left unconfirmed in an earlier pass ("needs a manual
+        // download" in the Profiles menu); each now has a verified
+        // Hugging Face repo whose filename exactly matches this preset's
+        // modelPath, so "Add all presets" can fetch every one of them.
+        let expectations: [(id: String, sourceModelID: String, filename: String)] = [
+            ("gemma4-8b-opencode", "bartowski/google_gemma-4-E4B-it-GGUF", "google_gemma-4-E4B-it-Q5_K_M.gguf"),
+            ("gemma4-26b-opencode", "unsloth/gemma-4-26B-A4B-it-GGUF", "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"),
+            ("mistral-small31-32", "bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF", "mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf"),
+            ("qwen14-24-imac-mini-pro", "bartowski/Qwen_Qwen3-14B-GGUF", "Qwen_Qwen3-14B-Q4_K_M.gguf"),
+            ("qwen8-16", "bartowski/Qwen_Qwen3-8B-GGUF", "Qwen_Qwen3-8B-Q4_K_M.gguf"),
+            ("gemma12-24", "bartowski/google_gemma-3-12b-it-GGUF", "google_gemma-3-12b-it-Q4_K_M.gguf"),
+            ("qwen30-36", "bartowski/Qwen_Qwen3-30B-A3B-GGUF", "Qwen_Qwen3-30B-A3B-Q4_K_M.gguf"),
+            ("llama70-64", "bartowski/Llama-3.3-70B-Instruct-GGUF", "Llama-3.3-70B-Instruct-Q4_K_M.gguf"),
+            ("qwen32-64-studio", "bartowski/Qwen_Qwen3-32B-GGUF", "Qwen_Qwen3-32B-Q6_K.gguf"),
+        ]
+        for expectation in expectations {
+            let preset = ProfilePreset.all.first(where: { $0.id == expectation.id })
+            XCTAssertNotNil(preset, "missing preset \(expectation.id)")
+            XCTAssertEqual(preset?.downloadSourceModelID, expectation.sourceModelID, "wrong source repo for \(expectation.id)")
+            XCTAssertEqual(preset?.expectedGGUFFilename, expectation.filename, "wrong filename for \(expectation.id)")
+        }
+    }
+
+    func testVisionChatCurationAndPresets() {
+        let expectedModelIDs = ["Qwen/Qwen3-VL-8B-Instruct-GGUF", "Qwen/Qwen3-VL-32B-Instruct-GGUF", "mlx-community/Qwen3-VL-8B-Instruct-4bit"]
+        XCTAssertTrue(Set(expectedModelIDs).isSubset(of: Set(ModelCategory.recommendedVisionChat.recommendedModelIDs)))
+        let presetModels = Set(ProfilePreset.all.map(\.profile.modelPath))
+        XCTAssertTrue(presetModels.contains(where: { $0.hasSuffix("Qwen3VL-8B-Instruct-Q4_K_M.gguf") }))
+        XCTAssertTrue(presetModels.contains(where: { $0.hasSuffix("Qwen3VL-8B-Instruct-Q8_0.gguf") }))
+        XCTAssertTrue(presetModels.contains(where: { $0.hasSuffix("Qwen3VL-32B-Instruct-Q4_K_M.gguf") }))
+        XCTAssertTrue(ProfilePreset.all.contains(where: { $0.profile.modelPath.hasSuffix("Qwen3VL-32B-Instruct-Q4_K_M.gguf") && $0.hardware.contains("48 GB") }))
+    }
+
     func testReferenceMemoryTierPresets() {
         let tiers = Set(ProfilePreset.all.map(\.hardware))
         XCTAssertTrue(tiers.contains(where: { $0.contains("8 GB") }))
@@ -523,5 +737,248 @@ final class DownloadAndModelTests: XCTestCase {
         XCTAssertEqual(models.filter { $0.supports(.llamaCPP) }.map(\.format), [.gguf])
         XCTAssertEqual(models.filter { $0.supports(.mlxLM) }.map(\.format), [.mlx])
         XCTAssertEqual(models.filter { $0.supports(.vllmMLX) }.map(\.format), [.mlx])
+    }
+
+    func testProfileStatusPrioritizesFailedThenLifecycleThenDownloadThenMissingModel() {
+        // Failed wins over everything else, even if it's somehow also
+        // flagged as the running/downloading profile.
+        XCTAssertEqual(
+            ProfileStatus.status(isFailed: true, isRunningProfile: true, serverLifecycleIsRunning: true, isDownloadingThisProfile: true, modelAvailable: false),
+            .failed
+        )
+        // Running profile: the server's own lifecycle decides running vs. still starting.
+        XCTAssertEqual(
+            ProfileStatus.status(isFailed: false, isRunningProfile: true, serverLifecycleIsRunning: true, isDownloadingThisProfile: false, modelAvailable: true),
+            .running
+        )
+        XCTAssertEqual(
+            ProfileStatus.status(isFailed: false, isRunningProfile: true, serverLifecycleIsRunning: false, isDownloadingThisProfile: false, modelAvailable: true),
+            .starting
+        )
+        // Not running: an in-flight download for this profile takes priority over "missing".
+        XCTAssertEqual(
+            ProfileStatus.status(isFailed: false, isRunningProfile: false, serverLifecycleIsRunning: false, isDownloadingThisProfile: true, modelAvailable: false),
+            .downloading
+        )
+        // Not running, not downloading, no model on disk yet.
+        XCTAssertEqual(
+            ProfileStatus.status(isFailed: false, isRunningProfile: false, serverLifecycleIsRunning: false, isDownloadingThisProfile: false, modelAvailable: false),
+            .modelMissing
+        )
+        // Idle and ready to start.
+        XCTAssertEqual(
+            ProfileStatus.status(isFailed: false, isRunningProfile: false, serverLifecycleIsRunning: false, isDownloadingThisProfile: false, modelAvailable: true),
+            .ready
+        )
+    }
+
+    func testDownloadMenuBarSummaryCoversResolvingInProgressAndNoTotalYet() {
+        // Still resolving metadata -- no byte counts yet at all.
+        XCTAssertEqual(
+            DownloadMenuBarPresentation.summary(modelName: "bartowski/Qwen_Qwen3-14B-GGUF", isResolving: true, status: "", progress: 0, totalBytes: 0, bytesPerSecond: 0),
+            "Resolving Qwen_Qwen3-14B-GGUF…"
+        )
+        XCTAssertEqual(
+            DownloadMenuBarPresentation.summary(modelName: "", isResolving: true, status: "", progress: 0, totalBytes: 0, bytesPerSecond: 0),
+            "Resolving download…"
+        )
+        // Resolved but the total byte count hasn't arrived yet -- falls
+        // back to whatever status string the download loop is reporting.
+        XCTAssertEqual(
+            DownloadMenuBarPresentation.summary(modelName: "bartowski/Qwen_Qwen3-14B-GGUF", isResolving: false, status: "Preparing…", progress: 0, totalBytes: 0, bytesPerSecond: 0),
+            "Qwen_Qwen3-14B-GGUF: Preparing…"
+        )
+        // Normal in-progress download with real numbers.
+        let summary = DownloadMenuBarPresentation.summary(modelName: "bartowski/Qwen_Qwen3-14B-GGUF", isResolving: false, status: "Downloading", progress: 0.5, totalBytes: 1_000_000_000, bytesPerSecond: 10_000_000)
+        XCTAssertTrue(summary.hasPrefix("Qwen_Qwen3-14B-GGUF: "))
+        XCTAssertTrue(summary.contains("50"))
+        XCTAssertTrue(summary.hasSuffix("/s"))
+    }
+
+    func testExternalRequestLabelOnlyShowsForNonInferenceBarTrafficWhileRunning() {
+        // Not running at all -- nothing to show regardless of count.
+        XCTAssertNil(MenuBarLifecyclePresentation.externalRequestLabel(lifecycle: .stopped, isSending: false, activeRequests: 3))
+        XCTAssertNil(MenuBarLifecyclePresentation.externalRequestLabel(lifecycle: .starting, isSending: false, activeRequests: 3))
+        // Running, but InferenceBar's own chat is the one sending -- that
+        // already has its own status line, so this would be redundant.
+        XCTAssertNil(MenuBarLifecyclePresentation.externalRequestLabel(lifecycle: .running, isSending: true, activeRequests: 3))
+        // Running and idle -- no external traffic to report.
+        XCTAssertNil(MenuBarLifecyclePresentation.externalRequestLabel(lifecycle: .running, isSending: false, activeRequests: 0))
+        // The actual case this exists for: running, not InferenceBar's
+        // own chat, and the server log shows active requests.
+        XCTAssertEqual(MenuBarLifecyclePresentation.externalRequestLabel(lifecycle: .running, isSending: false, activeRequests: 1), "1 external request active")
+        XCTAssertEqual(MenuBarLifecyclePresentation.externalRequestLabel(lifecycle: .running, isSending: false, activeRequests: 2), "2 external requests active")
+    }
+
+    func testMinimumUnifiedMemoryParsesPlainRangeAndPlusHardwareStrings() {
+        func preset(hardware: String) -> ProfilePreset {
+            ProfilePreset(id: "t", title: "t", hardware: hardware, summary: "", profile: ServerProfile(name: "t", alias: "t"))
+        }
+        XCTAssertEqual(preset(hardware: "Apple Silicon · 16 GB").minimumUnifiedMemoryGB, 16)
+        // A range or a "+" both mean "sized for at least this much" -- the
+        // low end is the floor to compare against, not an average.
+        XCTAssertEqual(preset(hardware: "M2/M3/M4 Pro or Max · 36–48 GB").minimumUnifiedMemoryGB, 36)
+        XCTAssertEqual(preset(hardware: "Mac Studio Ultra / Mac Pro · 192 GB+").minimumUnifiedMemoryGB, 192)
+        // No GB figure at all -- never filtered out sight unseen.
+        XCTAssertNil(preset(hardware: "Apple Silicon").minimumUnifiedMemoryGB)
+    }
+
+    func testIsSupportedComparesAgainstTheFloorNotTheWholeRange() {
+        func preset(hardware: String) -> ProfilePreset {
+            ProfilePreset(id: "t", title: "t", hardware: hardware, summary: "", profile: ServerProfile(name: "t", alias: "t"))
+        }
+        let tier = preset(hardware: "M2/M3/M4 Pro or Max · 36–48 GB")
+        XCTAssertFalse(tier.isSupported(physicalMemoryGB: 24))
+        XCTAssertTrue(tier.isSupported(physicalMemoryGB: 36))
+        XCTAssertTrue(tier.isSupported(physicalMemoryGB: 48))
+        XCTAssertTrue(tier.isSupported(physicalMemoryGB: 192))
+        // A hardware string this doesn't understand is always supported --
+        // "filter nothing" is the safe default, not "hide everything".
+        XCTAssertTrue(preset(hardware: "Apple Silicon").isSupported(physicalMemoryGB: 8))
+    }
+
+    func testEveryCurrentPresetsHardwareStringParses() {
+        // A regression catcher: if a future preset's `hardware` field
+        // drifts from the "... · N[-M] GB[+]" convention, it would
+        // silently stop being hardware-filtered (isSupported treats an
+        // unparseable string as always-supported) instead of failing
+        // loudly, so this pins the convention down explicitly.
+        for preset in ProfilePreset.all {
+            XCTAssertNotNil(preset.minimumUnifiedMemoryGB, "\(preset.id) hardware string \"\(preset.hardware)\" didn't parse a GB figure")
+        }
+    }
+
+    func testEveryCurrentPresetHasAtLeastOneUseCase() {
+        // A regression catcher for the "Add preset" menu's category
+        // submenus: an untagged preset isn't lost (presetCategoryMenu(nil)
+        // in ContentView.swift catches it), but it's still worth knowing
+        // if a newly added preset was forgotten rather than deliberately
+        // left uncategorized.
+        for preset in ProfilePreset.all {
+            XCTAssertFalse(preset.useCases.isEmpty, "\(preset.id) has no PresetUseCase tag")
+        }
+    }
+
+    func testVisionCapablePresetsAreTaggedChatWithImages() {
+        // These six are confirmed (via each repo's real sibling file
+        // listing) to ship an mmproj projector file that llama.cpp or
+        // mlx-vlm actually wires up, not just a model family that's
+        // "usually" multimodal -- see the comments beside each preset in
+        // Models.swift.
+        let visionCapable = ["mlx-qwen3-vl-8b-home-16", "gguf-qwen3-vl-8b-q4-16", "gguf-qwen3-vl-8b-q8-32", "gguf-qwen3-vl-32b-q4-48", "mistral-small31-32", "gemma12-24"]
+        for id in visionCapable {
+            let preset = ProfilePreset.all.first { $0.id == id }
+            XCTAssertEqual(preset?.useCases.contains(.visionChat), true, "\(id) should be tagged .visionChat")
+        }
+    }
+
+    func testPresetUseCaseTitlesAndIconsAreDistinct() {
+        // Every case needs its own label and symbol -- a collision would
+        // make two categories indistinguishable in the "Add preset" menu.
+        let titles = Set(PresetUseCase.allCases.map(\.title))
+        let icons = Set(PresetUseCase.allCases.map(\.icon))
+        XCTAssertEqual(titles.count, PresetUseCase.allCases.count)
+        XCTAssertEqual(icons.count, PresetUseCase.allCases.count)
+    }
+
+    func testChunkRangesCoverTheWholeFileContiguouslyWithNoGapsOrOverlaps() {
+        // A realistic ~4 GB quant split 4 ways.
+        let totalBytes: Int64 = 4_000_000_003 // deliberately not evenly divisible
+        let ranges = ParallelDownloadPlanner.chunkRanges(totalBytes: totalBytes)
+        XCTAssertEqual(ranges.count, ParallelDownloadPlanner.chunkCount)
+        XCTAssertEqual(ranges.first?.lowerBound, 0)
+        XCTAssertEqual(ranges.last?.upperBound, totalBytes - 1)
+        for (previous, next) in zip(ranges, ranges.dropFirst()) {
+            XCTAssertEqual(next.lowerBound, previous.upperBound + 1, "chunks must be back-to-back with no gap or overlap")
+        }
+        let coveredBytes = ranges.reduce(Int64(0)) { $0 + ($1.upperBound - $1.lowerBound + 1) }
+        XCTAssertEqual(coveredBytes, totalBytes)
+    }
+
+    func testChunkRangesNeverExceedsOneChunkPerByte() {
+        // Fewer bytes than the usual chunk count -- degrade to fewer,
+        // still-valid ranges instead of an empty or zero-length one.
+        let ranges = ParallelDownloadPlanner.chunkRanges(totalBytes: 3)
+        XCTAssertEqual(ranges.count, 3)
+        XCTAssertEqual(ranges, [0...0, 1...1, 2...2])
+        XCTAssertEqual(ParallelDownloadPlanner.chunkRanges(totalBytes: 0), [])
+    }
+
+    func testShouldSplitOnlyAboveTheMinimumSizeThreshold() {
+        XCTAssertFalse(ParallelDownloadPlanner.shouldSplit(totalBytes: ParallelDownloadPlanner.minimumBytesToSplit - 1))
+        XCTAssertTrue(ParallelDownloadPlanner.shouldSplit(totalBytes: ParallelDownloadPlanner.minimumBytesToSplit))
+        XCTAssertTrue(ParallelDownloadPlanner.shouldSplit(totalBytes: ParallelDownloadPlanner.minimumBytesToSplit * 100))
+    }
+
+    func testEveryVisionCapableGGUFPresetHasAConfirmedMmprojFilename() {
+        // Every .visionChat preset that runs on llama.cpp needs a
+        // confirmed mmproj companion filename so "Add preset"/"Add all
+        // presets" can actually fetch it (see
+        // AppStore.processPresetDownloadQueue) -- without this, the model
+        // downloads and runs fine but every image attachment gets refused,
+        // which is exactly the bug that motivated adding mmprojFilename in
+        // the first place. MLX/vLLM-MLX vision presets are exempt: their
+        // runtime doesn't use a separate --mmproj file at all.
+        for preset in ProfilePreset.all where preset.useCases.contains(.visionChat) && preset.profile.runtime == .llamaCPP {
+            XCTAssertNotNil(preset.mmprojFilename, "\(preset.id) is tagged .visionChat and runs on llama.cpp but has no mmprojFilename set")
+        }
+    }
+
+    func testHasProjectorAvailableIsVacuouslyTrueForNonVisionPresets() {
+        // A preset with no mmprojFilename has nothing to check for, so it
+        // should never block on a projector it was never going to fetch --
+        // even against an empty/nonexistent directory.
+        let nonVisionPreset = ProfilePreset.all.first { $0.mmprojFilename == nil }
+        XCTAssertNotNil(nonVisionPreset, "expected at least one preset without mmprojFilename to exist for this test")
+        let emptyDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        XCTAssertTrue(nonVisionPreset!.hasProjectorAvailable(modelRoot: emptyDirectory))
+    }
+
+    func testHasProjectorAvailableFindsAMatchingSiblingRegardlessOfWhichModelItWasDownloadedFor() {
+        // The app's model directory is flat and shared across every
+        // downloaded model (see MultimodalProjector's doc comments), so
+        // hasProjectorAvailable should be satisfied by ANY mmproj file
+        // sitting in modelRoot, not specifically the one named in
+        // mmprojFilename -- mirroring MultimodalProjector.hasProjectorSibling's
+        // own matching rule.
+        let visionPreset = ProfilePreset.all.first { $0.mmprojFilename != nil }
+        XCTAssertNotNil(visionPreset, "expected at least one preset with mmprojFilename to exist for this test")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        XCTAssertFalse(visionPreset!.hasProjectorAvailable(modelRoot: directory), "should report missing before any projector file exists")
+        let differentlyNamedProjector = directory.appendingPathComponent("some-other-mmproj-file-f16.gguf")
+        FileManager.default.createFile(atPath: differentlyNamedProjector.path, contents: Data())
+        XCTAssertTrue(visionPreset!.hasProjectorAvailable(modelRoot: directory), "any mmproj-named sibling should satisfy the check")
+    }
+
+    func testHFModelSiblingsDecodeWithTheRfilenameKeyThatModelCardReliesOn() {
+        // ModelCard (ContentView.swift) computes its "Vision" tag as
+        // MultimodalProjector.hasProjectorSibling(among: (model.siblings ??
+        // []).map(\.rfilename)) -- this pins down that an HFModel decoded
+        // from a real `?full=true` Hugging Face API response actually
+        // populates `siblings` with that shape, so a rename of the
+        // "rfilename" JSON key (or of the Sibling type) would fail loudly
+        // here instead of just silently making every ModelCard's vision
+        // tag disappear.
+        let json = """
+        {"id":"Qwen/Qwen3-VL-8B-Instruct-GGUF","siblings":[{"rfilename":"Qwen3VL-8B-Instruct-F16.gguf"},{"rfilename":"mmproj-Qwen3VL-8B-Instruct-F16.gguf"},{"rfilename":"README.md"}]}
+        """
+        let model = try! JSONDecoder().decode(HFModel.self, from: Data(json.utf8))
+        let siblingNames = (model.siblings ?? []).map(\.rfilename)
+        XCTAssertEqual(siblingNames, ["Qwen3VL-8B-Instruct-F16.gguf", "mmproj-Qwen3VL-8B-Instruct-F16.gguf", "README.md"])
+        XCTAssertTrue(MultimodalProjector.hasProjectorSibling(among: siblingNames))
+    }
+
+    func testHFModelWithNoSiblingsFieldDoesNotCrashTheVisionTagComputation() {
+        // A search path that doesn't request `full=true` (or a repo with
+        // no listed files) decodes `siblings` as nil -- ModelCard's `??
+        // []` fallback should read as "no projector found", not crash.
+        let json = """
+        {"id":"bartowski/some-model-GGUF"}
+        """
+        let model = try! JSONDecoder().decode(HFModel.self, from: Data(json.utf8))
+        XCTAssertNil(model.siblings)
+        XCTAssertFalse(MultimodalProjector.hasProjectorSibling(among: (model.siblings ?? []).map(\.rfilename)))
     }
 }

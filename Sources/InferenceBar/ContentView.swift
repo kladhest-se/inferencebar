@@ -26,13 +26,13 @@ struct AboutInferenceBarView: View {
 }
 
 enum ModelArea: String, CaseIterable, Identifiable {
-    case downloaded = "Downloaded", recommendedCoding = "Coding Picks", recommendedChat = "Chat Picks", recommendedSystems = "Sysadmin Picks", recommendedHomeAutomation = "Home Automation", recommendedAppleSilicon = "Apple Silicon", trending = "Trending", mostDownloaded = "Most downloaded", recentlyUpdated = "Recently updated", text = "Text & Chat", coding = "Coding", multimodal = "Multimodal", vision = "Vision", audio = "Audio", languages = "Languages"
+    case recommendedCoding = "Coding Picks", recommendedChat = "Chat Picks", recommendedVisionChat = "Chat with Images", recommendedSystems = "Sysadmin Picks", recommendedHomeAutomation = "Home Automation", recommendedAppleSilicon = "Apple Silicon", trending = "Trending", mostDownloaded = "Most downloaded", recentlyUpdated = "Recently updated", text = "Text & Chat", coding = "Coding", multimodal = "Multimodal", vision = "Vision", audio = "Audio", languages = "Languages"
     var id: Self { self }
     var categories: [ModelCategory] {
         switch self {
-        case .downloaded: []
         case .recommendedCoding: [.recommendedCoding]
         case .recommendedChat: [.recommendedChat]
+        case .recommendedVisionChat: [.recommendedVisionChat]
         case .recommendedSystems: [.recommendedSystems]
         case .recommendedHomeAutomation: [.recommendedHomeAutomation]
         case .recommendedAppleSilicon: [.recommendedAppleSilicon]
@@ -49,65 +49,18 @@ enum ModelArea: String, CaseIterable, Identifiable {
     }
 }
 
-struct ContentView: View {
-    @Environment(AppStore.self) private var store
-    @State private var modelArea: ModelArea = .recommendedChat
-
-    var body: some View {
-        @Bindable var store = store
-        NavigationSplitView {
-            List(selection: $store.requestedSection) {
-                Label("Profiles", systemImage: "slider.horizontal.3").tag(AppSection.profiles)
-                Label("Models", systemImage: "square.and.arrow.down").tag(AppSection.models)
-                if store.requestedSection == .models {
-                    Section("Models") {
-                        modelAreaButton(.downloaded, icon: "arrow.down.circle.fill")
-                    }
-                    Section("Discover") {
-                        modelAreaButton(.trending, icon: "flame")
-                        modelAreaButton(.mostDownloaded, icon: "arrow.down.circle")
-                        modelAreaButton(.recentlyUpdated, icon: "clock.arrow.circlepath")
-                    }
-                    Section("Curated") {
-                        modelAreaButton(.recommendedCoding, icon: "chevron.left.forwardslash.chevron.right")
-                        modelAreaButton(.recommendedChat, icon: "bubble.left.and.bubble.right.fill")
-                        modelAreaButton(.recommendedSystems, icon: "server.rack")
-                        modelAreaButton(.recommendedHomeAutomation, icon: "house.and.flag.fill")
-                        modelAreaButton(.recommendedAppleSilicon, icon: "apple.logo")
-                    }
-                    Section("Categories") {
-                        modelAreaButton(.text, icon: "text.bubble")
-                        modelAreaButton(.coding, icon: "chevron.left.forwardslash.chevron.right")
-                        modelAreaButton(.multimodal, icon: "square.stack.3d.up")
-                        modelAreaButton(.vision, icon: "eye")
-                        modelAreaButton(.audio, icon: "waveform")
-                        modelAreaButton(.languages, icon: "character.book.closed")
-                    }
-                }
-            }
-                .navigationTitle("InferenceBar")
-                .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 240)
-        } detail: {
-            Group {
-                switch store.requestedSection {
-                case .profiles: ProfilesView()
-                case .models: ModelsView(area: $modelArea)
-                default: ProfilesView()
-                }
-            }.environment(store)
-        }
-        .alert("InferenceBar", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) { Button("OK") { store.errorMessage = nil } } message: { Text(store.errorMessage ?? "") }
-    }
-
-    private func modelAreaButton(_ area: ModelArea, icon: String) -> some View {
-        Button { modelArea = area } label: { Label(area.rawValue, systemImage: icon).frame(maxWidth: .infinity, alignment: .leading) }
-            .buttonStyle(.plain).foregroundStyle(modelArea == area ? Color.accentColor : Color.primary)
-    }
-}
-
 struct ProfilesView: View {
     @Environment(AppStore.self) private var store
     @State private var showsDeleteConfirm = false
+    // The List's own selection -- a Set so ⌘-click/⇧-click can select
+    // more than one profile at once (for bulk removal below). Mirrored
+    // into store.selectedProfileID (see the onChange below) whenever
+    // exactly one profile is selected, since every other single-profile
+    // action in this app (start/stop, duplicate, default, favorite, the
+    // detail editor) is written against that one existing property --
+    // duplicating that plumbing for a rarely-multi-selected list wasn't
+    // worth it.
+    @State private var multiSelection: Set<UUID> = []
     var body: some View {
         @Bindable var store = store
         HSplitView {
@@ -116,9 +69,9 @@ struct ProfilesView: View {
                     Text("Profiles").font(.title2).fontWeight(.semibold)
                 }.padding(12)
                 Divider()
-                List(store.profiles, selection: $store.selectedProfileID) { p in
+                List(store.profiles, selection: $multiSelection) { p in
                     HStack {
-                        Circle().fill(profileColor(p.id)).frame(width: 8)
+                        Circle().fill(profileColor(p)).frame(width: 8)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(p.name).lineLimit(1)
                             Text(p.runtime.title).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -129,47 +82,143 @@ struct ProfilesView: View {
                         if store.runningProfileID == p.id && store.serverLifecycle != .running { ProgressView().controlSize(.mini) }
                     }
                 }
+                .onAppear { if let id = store.selectedProfileID { multiSelection = [id] } }
+                .onChange(of: multiSelection) { _, ids in store.selectedProfileID = ids.count == 1 ? ids.first : nil }
+                if multiSelection.count > 1 {
+                    Text("\(multiSelection.count) profiles selected").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.top, 6)
+                }
                 HStack {
                     Button(action: store.addProfile) { Image(systemName: "plus") }
                         .help("Add profile").accessibilityLabel("Add profile")
                     Menu {
-                        Section("Downloaded model presets") {
-                            ForEach(store.availablePresets) { preset in
-                                Button { store.addPreset(preset) } label: { Text("\(preset.hardware) — \(preset.title)") }
-                            }
-                            if store.availablePresets.isEmpty { Text("Download a matching model to enable presets") }
+                        Button("Add all presets") { store.addAllPresets() }
+                            .help("Adds every preset below, starting a download automatically for any model not already on disk. Skips presets sized for more unified memory than this Mac has.")
+                        Divider()
+                        ForEach(PresetUseCase.allCases, id: \.self) { presetCategoryMenu($0) }
+                        presetCategoryMenu(nil)
+                        if store.availablePresets.isEmpty && store.missingPresets.isEmpty {
+                            Text("Download a matching model to enable presets")
+                        }
+                        if store.hardwareFilteredPresetCount > 0 {
+                            Divider()
+                            Text("\(store.hardwareFilteredPresetCount) more hidden — sized for more unified memory than this Mac has")
                         }
                     } label: { Image(systemName: "sparkles") }
                         .help("Add a hardware preset; unified memory matters more than chip generation")
                         .accessibilityLabel("Add a hardware preset")
                     Button(action: store.duplicateProfile) { Image(systemName: "plus.square.on.square") }
                         .help("Duplicate profile").accessibilityLabel("Duplicate profile")
+                        .disabled(multiSelection.count != 1)
                     Button { showsDeleteConfirm = true } label: { Image(systemName: "trash") }
-                        .help("Delete profile").accessibilityLabel("Delete profile")
-                        .disabled(store.selectedProfile == nil)
+                        .help(multiSelection.count > 1 ? "Delete selected profiles" : "Delete profile")
+                        .accessibilityLabel(multiSelection.count > 1 ? "Delete selected profiles" : "Delete profile")
+                        .disabled(multiSelection.isEmpty)
                         .confirmationDialog(
-                            "Delete “\(store.selectedProfile?.name ?? "this profile")”?",
+                            multiSelection.count > 1 ? "Delete \(multiSelection.count) profiles?" : "Delete “\(store.selectedProfile?.name ?? "this profile")”?",
                             isPresented: $showsDeleteConfirm,
                             titleVisibility: .visible
                         ) {
-                            Button("Delete", role: .destructive) { store.deleteSelectedProfile() }
+                            Button(multiSelection.count > 1 ? "Delete \(multiSelection.count) Profiles" : "Delete", role: .destructive) {
+                                store.deleteProfiles(multiSelection)
+                                multiSelection = []
+                            }
                             Button("Cancel", role: .cancel) {}
                         } message: {
-                            Text("This removes its configuration permanently. This can't be undone.")
+                            Text(multiSelection.count > 1
+                                ? "This removes their configurations permanently. The running profile, if selected, is kept running and skipped. This can't be undone."
+                                : "This removes its configuration permanently. This can't be undone.")
                         }
                     Spacer()
                 }.padding(8)
             }.frame(minWidth: 210, idealWidth: 250, maxWidth: 290)
-            if let index = store.selectedProfileIndex { ProfileEditor(profile: $store.profiles[index]).frame(minWidth: 380) } else { ContentUnavailableView("Select a profile", systemImage: "slider.horizontal.3").frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity) }
+            if multiSelection.count > 1 {
+                ContentUnavailableView("\(multiSelection.count) profiles selected", systemImage: "checklist", description: Text("Select a single profile to edit it, or use the trash button to delete the whole selection."))
+                    .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+            } else if let index = store.selectedProfileIndex {
+                ProfileEditor(profile: $store.profiles[index]).frame(minWidth: 380)
+            } else {
+                ContentUnavailableView("Select a profile", systemImage: "slider.horizontal.3").frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .frame(minWidth: 760, minHeight: 560)
         .navigationTitle("Server profiles")
+        .inferenceBarErrorAlert(store)
     }
 
-    private func profileColor(_ id: UUID) -> Color {
-        if store.failedProfileID == id { return .red }
-        if store.runningProfileID == id { return store.serverLifecycle == .running ? .green : .orange }
-        return .secondary
+    /// One "Add preset" submenu for a use-case category (or, when
+    /// `useCase` is nil, an "Other" catch-all for any preset that
+    /// carries no tag at all -- none currently do, but a preset added
+    /// later without a useCases entry should still be reachable rather
+    /// than silently missing from every submenu). Hidden entirely when
+    /// nothing in this category is offered, so an empty category doesn't
+    /// leave a dead submenu in the list. Splits into the same
+    /// downloaded-vs-not sections the flat menu used before
+    /// categorization, so neither distinction is lost.
+    @ViewBuilder
+    private func presetCategoryMenu(_ useCase: PresetUseCase?) -> some View {
+        let matches: (ProfilePreset) -> Bool = { preset in
+            if let useCase { return preset.useCases.contains(useCase) }
+            return preset.useCases.isEmpty
+        }
+        let sortPresets: (ProfilePreset, ProfilePreset) -> Bool = { a, b in
+            a.hardware == b.hardware ? a.title.localizedStandardCompare(b.title) == .orderedAscending : a.hardware.localizedStandardCompare(b.hardware) == .orderedAscending
+        }
+        let downloaded = store.availablePresets.filter(matches).sorted(by: sortPresets)
+        let missing = store.missingPresets.filter(matches).sorted(by: sortPresets)
+        if !downloaded.isEmpty || !missing.isEmpty {
+            Menu {
+                if !downloaded.isEmpty {
+                    Section("Downloaded model presets") {
+                        ForEach(downloaded) { preset in
+                            Button { store.addPreset(preset) } label: { Text("\(preset.hardware) — \(preset.title)") }
+                        }
+                    }
+                }
+                if !missing.isEmpty {
+                    Section("Not yet downloaded") {
+                        ForEach(missing) { preset in
+                            Button {
+                                store.addPresetStartingDownloadIfNeeded(preset)
+                            } label: {
+                                Text(preset.downloadSourceModelID != nil
+                                    ? "\(preset.hardware) — \(preset.title) (downloads automatically)"
+                                    : "\(preset.hardware) — \(preset.title) (needs a manual download)")
+                            }
+                        }
+                    }
+                }
+            } label: { Label(useCase?.title ?? "Other", systemImage: useCase?.icon ?? "ellipsis.circle") }
+        }
+    }
+
+    private func modelIsAvailable(_ profile: ServerProfile) -> Bool {
+        if profile.runtime.usesGGUF {
+            let expandedPath = NSString(string: profile.modelPath).expandingTildeInPath
+            var isDirectory: ObjCBool = false
+            return !profile.modelPath.isEmpty
+                && FileManager.default.fileExists(atPath: expandedPath, isDirectory: &isDirectory)
+                && !isDirectory.boolValue
+                && expandedPath.lowercased().hasSuffix(".gguf")
+        }
+        return store.isMLXModelCached(profile.modelPath)
+    }
+
+    private func profileColor(_ profile: ServerProfile) -> Color {
+        let status = ProfileStatus.status(
+            isFailed: store.failedProfileID == profile.id,
+            isRunningProfile: store.runningProfileID == profile.id,
+            serverLifecycleIsRunning: store.serverLifecycle == .running,
+            isDownloadingThisProfile: (store.isDownloading || store.isResolvingDownload) && store.downloadOwnerProfileID == profile.id,
+            modelAvailable: modelIsAvailable(profile)
+        )
+        switch status {
+        case .failed: return .red
+        case .running: return .green
+        case .starting: return .orange
+        case .downloading: return .blue
+        case .modelMissing: return .gray.opacity(0.35)
+        case .ready: return .secondary
+        }
     }
 }
 
@@ -185,7 +234,19 @@ struct ProfileEditor: View {
             && !isDirectory.boolValue
             && expandedPath.lowercased().hasSuffix(".gguf")
     }
-    private var modelAvailable: Bool { profile.runtime.usesGGUF ? modelExists : store.isMLXModelCached(profile.modelPath) }
+    // A model file can already exist on disk (e.g. pre-allocated for the
+    // parallel-range-request downloader, see the download() docs in
+    // AppStore.swift) well before its download actually finishes, so
+    // modelExists/isMLXModelCached alone can't tell "downloaded" from
+    // "still downloading" -- this profile is only really ready once
+    // nothing is actively fetching its model.
+    private var isDownloadingThisProfile: Bool {
+        (store.isDownloading || store.isResolvingDownload) && store.downloadOwnerProfileID == profile.id
+    }
+    private var modelAvailable: Bool {
+        guard !isDownloadingThisProfile else { return false }
+        return profile.runtime.usesGGUF ? modelExists : store.isMLXModelCached(profile.modelPath)
+    }
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -195,6 +256,8 @@ struct ProfileEditor: View {
                         Label(store.serverLifecycle.label, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
                     } else if store.runningProfileID == profile.id {
                         Label(store.serverLifecycle.label, systemImage: store.serverLifecycle == .running ? "checkmark.circle.fill" : "clock.fill").foregroundStyle(store.serverLifecycle == .running ? .green : .orange)
+                    } else if isDownloadingThisProfile {
+                        Label("Downloading model…", systemImage: "arrow.down.circle.fill").foregroundStyle(.blue)
                     } else {
                         Label(modelAvailable ? "Model downloaded" : "Model missing", systemImage: modelAvailable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(modelAvailable ? .green : .orange)
                     }
@@ -219,6 +282,8 @@ struct ProfileEditor: View {
                     else if store.networkSettings.exposedWithoutAuthentication { showsNetworkExposureConfirm = true }
                     else { store.start() }
                 }.buttonStyle(.borderedProminent).tint(store.runningProfileID == profile.id ? .red : .accentColor)
+                .disabled(store.runningProfileID != profile.id && !modelAvailable)
+                .help(store.runningProfileID != profile.id && !modelAvailable ? "Download this model before starting the profile" : "")
                 .confirmationDialog("Start without authentication?", isPresented: $showsNetworkExposureConfirm, titleVisibility: .visible) {
                     Button("Start anyway", role: .destructive) { store.start() }
                     Button("Cancel", role: .cancel) {}
@@ -235,13 +300,13 @@ struct ProfileEditor: View {
             if (store.isDownloading || store.isResolvingDownload) && store.downloadOwnerProfileID == profile.id {
                 VStack(alignment: .leading, spacing: 5) {
                     if store.isDownloading && store.downloadTotalBytes > 0 {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ProgressView(value: store.downloadProgress, total: 1)
-                                Text("\(store.downloadProgress.formatted(.percent.precision(.fractionLength(1)))) · \(store.downloadPhase) · \(ByteCountFormatter.string(fromByteCount: Int64(store.downloadBytesPerSecond), countStyle: .file))/s")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Button { store.toggleDownloadPause() } label: { Image(systemName: store.isDownloadPaused ? "play.fill" : "pause.fill") }.help(store.isDownloadPaused ? "Resume download" : "Pause download")
+                        // Pause/resume/cancel live only in the Downloads window
+                        // (Manage → Downloads) -- this is a status readout, not
+                        // a control surface, so it doesn't duplicate them here.
+                        VStack(alignment: .leading, spacing: 4) {
+                            ProgressView(value: store.downloadProgress, total: 1)
+                            Text("\(store.downloadProgress.formatted(.percent.precision(.fractionLength(1)))) · \(store.downloadPhase) · \(ByteCountFormatter.string(fromByteCount: Int64(store.downloadBytesPerSecond), countStyle: .file))/s")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     } else {
                         ProgressView()
@@ -534,6 +599,8 @@ struct GlobalServerSettingsView: View {
     @State private var webSearchTestFailed = false
     @State private var cliInstallResult: String?
     @State private var cliInstallFailed = false
+    @State private var openCodeSyncResult: String?
+    @State private var openCodeSyncFailed = false
 
     var body: some View {
         @Bindable var store = store
@@ -728,7 +795,7 @@ struct GlobalServerSettingsView: View {
                 }
                 settingsCard {
                     Label("Command-line tool", systemImage: "terminal").font(.headline)
-                    Text("Installs a small `inferencebar` command you can run from Terminal — `inferencebar ask \"...\"` sends a one-off prompt to whatever profile is currently running and prints the answer, so you can script against your local model without opening the Chat window.")
+                    Text("Installs a small `inference` command you can run from Terminal — `inference ask \"...\"` sends a one-off prompt to whatever profile is currently running and prints the answer, so you can script against your local model without opening the Chat window.")
                         .font(.caption).foregroundStyle(.secondary)
                     Divider()
                     HStack {
@@ -740,10 +807,63 @@ struct GlobalServerSettingsView: View {
                         Button("Install") { installCLITool() }
                     }
                 }
+                settingsCard {
+                    Label("OpenCode", systemImage: "chevron.left.forwardslash.chevron.right").font(.headline)
+                    Text("OpenCode is a terminal-based AI coding agent. Installing it here (via Homebrew) and syncing lets it use your \"Coding\"-tagged profiles as a local, OpenAI-compatible provider named InferenceBar, with no manual config editing.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Divider()
+                    HStack(spacing: 12) {
+                        Image(systemName: installedDependencies.contains(BrewDependency.opencode.id) ? "checkmark.circle.fill" : "circle.dashed")
+                            .foregroundStyle(installedDependencies.contains(BrewDependency.opencode.id) ? .green : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(BrewDependency.opencode.title).fontWeight(.medium)
+                            Text(BrewDependency.opencode.detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if installingDependencies.contains(BrewDependency.opencode.id) { ProgressView().controlSize(.small) }
+                        Button(installedDependencies.contains(BrewDependency.opencode.id) ? "Reinstall…" : "Install…") { install(BrewDependency.opencode) }
+                            .disabled(brewURL == nil || !installingDependencies.isEmpty)
+                    }
+                    if brewURL == nil {
+                        Text("Homebrew is required to install OpenCode — see Runtime dependencies above.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Divider()
+                    Picker("Default coding profile", selection: Binding(get: { store.defaultCodingProfileID }, set: { store.defaultCodingProfileID = $0 })) {
+                        Text("None").tag(nil as UUID?)
+                        ForEach(codingProfiles) { profile in Text(profile.name).tag(profile.id as UUID?) }
+                    }
+                    .onChange(of: store.defaultCodingProfileID) { _, _ in syncOpenCode() }
+                    Text(codingProfiles.isEmpty
+                        ? "Add a profile from a \"Coding\" preset to pick a default."
+                        : "OpenCode opens with this model selected; every synced profile below is still available in its own /models picker.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Divider()
+                    HStack {
+                        if let openCodeSyncResult {
+                            Label(openCodeSyncResult, systemImage: openCodeSyncFailed ? "xmark.circle.fill" : "checkmark.circle.fill")
+                                .font(.caption).foregroundStyle(openCodeSyncFailed ? .red : .green).lineLimit(3)
+                        } else {
+                            Text("Every profile added from a \"Coding\" preset syncs automatically. Use this after editing one by hand, or to sync presets added before this existed.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Sync now") { syncOpenCode() }
+                    }
+                }
             }.padding(28).frame(maxWidth: 900)
         }
         .navigationTitle("Server Settings")
         .task { refreshDependencies() }
+        .inferenceBarErrorAlert(store)
+    }
+
+    /// Profiles eligible for OpenCode's default-model picker above --
+    /// only ones that actually get synced (see AppStore.syncCodingProfilesToOpenCode),
+    /// so the picker never offers a profile OpenCode wouldn't recognize.
+    private var codingProfiles: [ServerProfile] {
+        store.profiles.filter { profile in
+            ProfilePreset.all.contains { $0.profile.runtime == profile.runtime && $0.profile.modelPath == profile.modelPath && $0.useCases.contains(.coding) }
+        }
     }
 
     private var portBinding: Binding<String> {
@@ -805,7 +925,7 @@ struct GlobalServerSettingsView: View {
 
     private func refreshDependencies() {
         brewURL = HomebrewRuntimeManager.brewURL()
-        installedDependencies = Set(BrewDependency.required.filter { HomebrewRuntimeManager.isInstalled($0) }.map(\.id))
+        installedDependencies = Set((BrewDependency.required + [.opencode]).filter { HomebrewRuntimeManager.isInstalled($0) }.map(\.id))
     }
 
     private func testWebSearch() async {
@@ -827,7 +947,7 @@ struct GlobalServerSettingsView: View {
         case .installed(let path, let onPATH):
             cliInstallFailed = false
             cliInstallResult = onPATH
-                ? "Installed to \(path). Open a new Terminal window and run `inferencebar ask \"...\"`."
+                ? "Installed to \(path). Open a new Terminal window and run `inference ask \"...\"`."
                 : "Installed to \(path), but that folder isn't on your PATH — run it with the full path, or add \(path) to your shell's PATH."
         case .bundledBinaryMissing:
             cliInstallFailed = true
@@ -835,6 +955,23 @@ struct GlobalServerSettingsView: View {
         case .failed(let reason):
             cliInstallFailed = true
             cliInstallResult = "Couldn't install the command-line tool: \(reason)"
+        }
+    }
+
+    private func syncOpenCode() {
+        switch store.syncCodingProfilesToOpenCode() {
+        case .synced(let path):
+            openCodeSyncFailed = false
+            openCodeSyncResult = "Synced to \(path)."
+        case .noCodingProfiles:
+            openCodeSyncFailed = true
+            openCodeSyncResult = "No profiles from a \"Coding\" preset are added yet — add one first (Manage → Add preset)."
+        case .openCodeNotSetUp:
+            openCodeSyncFailed = true
+            openCodeSyncResult = "Install OpenCode above (or run it once) before syncing."
+        case .failed(let reason):
+            openCodeSyncFailed = true
+            openCodeSyncResult = "Couldn't write OpenCode's config: \(reason)"
         }
     }
 
@@ -859,9 +996,6 @@ struct ModelStoreWindowView: View {
     var body: some View {
         NavigationSplitView {
             List {
-                Section("Models") {
-                    areaButton(.downloaded, icon: "arrow.down.circle.fill")
-                }
                 Section("Discover") {
                     areaButton(.trending, icon: "flame")
                     areaButton(.mostDownloaded, icon: "arrow.down.circle")
@@ -870,6 +1004,7 @@ struct ModelStoreWindowView: View {
                 Section("Curated") {
                     areaButton(.recommendedCoding, icon: "chevron.left.forwardslash.chevron.right")
                     areaButton(.recommendedChat, icon: "bubble.left.and.bubble.right.fill")
+                    areaButton(.recommendedVisionChat, icon: "photo.on.rectangle.angled")
                     areaButton(.recommendedSystems, icon: "server.rack")
                     areaButton(.recommendedHomeAutomation, icon: "house.and.flag.fill")
                     areaButton(.recommendedAppleSilicon, icon: "apple.logo")
@@ -887,9 +1022,7 @@ struct ModelStoreWindowView: View {
             ModelsView(area: $area).environment(store)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .alert("InferenceBar", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
-            Button("OK") { store.errorMessage = nil }
-        } message: { Text(store.errorMessage ?? "") }
+        .inferenceBarErrorAlert(store)
     }
 
     private func areaButton(_ value: ModelArea, icon: String) -> some View {
@@ -911,9 +1044,6 @@ struct ModelsView: View {
     var body: some View {
         @Bindable var store = store
         VStack(spacing: 0) {
-            if area == .downloaded {
-                    DownloadedModelsView(ggufDirectory: directory).frame(minWidth: 620)
-                } else {
                 VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text(area.rawValue).font(.title2).fontWeight(.semibold)
@@ -998,7 +1128,14 @@ struct ModelsView: View {
                         ForEach(store.modelFiles, id: \.self) { file in
                         let size = store.modelFileSizes[file] ?? 0
                         let isGGUF = store.modelCatalogBackend == .llamaCPP
-                        let onDisk = isGGUF ? ggufFileExists(file) : (store.selectedModel.map(isModelDownloaded) ?? false)
+                        // An active job takes priority over the raw on-disk
+                        // check -- GGUF downloads pre-allocate their
+                        // destination file before they finish (see
+                        // ggufFileExists), so checking onDisk first could
+                        // claim a still-downloading file was already
+                        // available on this Mac.
+                        let activeJob = store.selectedModel.flatMap { model in store.downloadJob(modelID: model.id, file: isGGUF ? file : nil) }
+                        let onDisk = activeJob == nil && (isGGUF ? ggufFileExists(file) : (store.selectedModel.map(isModelDownloaded) ?? false))
                         let assessment = ModelHardwareAdvisor.assess(fileSize: size, filename: file, contextSize: 32_768, hardware: currentHardware, alreadyDownloaded: onDisk)
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -1008,14 +1145,16 @@ struct ModelsView: View {
                             }
                             Spacer()
                             Text(assessment.fit.rawValue).modelFitBadge(assessment.fit).help(assessment.reason).fixedSize()
-                            if onDisk { Label("On disk", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
-                            else if let model = store.selectedModel, let job = store.downloadJob(modelID: model.id, file: isGGUF ? file : nil) {
+                            // Status only here -- pause/resume/cancel live in
+                            // the Downloads window (Manage → Downloads) so
+                            // there's exactly one place download controls
+                            // can be found, rather than duplicated (and
+                            // possibly stale) copies scattered across windows.
+                            if let job = activeJob {
                                 ProgressView(value: job.progress).frame(width: 80)
-                                Button { store.toggleDownloadPause(job.id) } label: { Image(systemName: job.isPaused ? "play.fill" : "pause.fill") }
-                                    .help(job.isPaused ? "Resume download" : "Pause download")
-                                    .accessibilityLabel(job.isPaused ? "Resume download" : "Pause download")
-                                Button { store.cancelDownload(job.id) } label: { Image(systemName: "xmark") }
-                                    .help("Cancel download").accessibilityLabel("Cancel download")
+                                Text(job.isPaused ? "Paused" : "\(job.progress.formatted(.percent.precision(.fractionLength(0))))").font(.caption).foregroundStyle(.secondary)
+                            } else if onDisk {
+                                Label("On disk", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                             } else {
                                 Button("Download") {
                                     if let model = store.selectedModel {
@@ -1039,16 +1178,14 @@ struct ModelsView: View {
                         }
                     }
                     if let selected = store.selectedModel, let job = store.downloadJob(modelID: selected.id) {
+                        // Status only -- see the pause/cancel comment above.
                         VStack(alignment: .leading, spacing: 6) {
                             ProgressView(value: job.progress, total: 1)
                             HStack {
-                                Text("\(job.progress.formatted(.percent.precision(.fractionLength(1))))")
+                                Text(job.isPaused ? "Paused" : "\(job.progress.formatted(.percent.precision(.fractionLength(1))))")
                                 Text("\(byteString(job.received)) / \(job.total > 0 ? byteString(job.total) : "Unknown size")")
                                 Spacer()
                                 if job.speed > 0 { Text("\(byteString(Int64(job.speed)))/s") }
-                                Button { store.toggleDownloadPause(job.id) } label: { Image(systemName: job.isPaused ? "play.fill" : "pause.fill") }.buttonStyle(.borderless)
-                                    .help(job.isPaused ? "Resume download" : "Pause download")
-                                    .accessibilityLabel(job.isPaused ? "Resume download" : "Pause download")
                             }.font(.caption).monospacedDigit().foregroundStyle(.secondary)
                         }
                     }
@@ -1057,12 +1194,10 @@ struct ModelsView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .navigationTitle("Model Store")
         .task(id: category.id) {
-            guard area != .downloaded else { return }
             installedRuntimeExecutables = RuntimeAvailability.installedExecutables()
             store.searchQuery = ""
             await searchAllFormats()
@@ -1205,222 +1340,6 @@ private struct LocalModelItem: Identifiable {
     let size: Int64
 }
 
-private struct DownloadedModelsView: View {
-    @Environment(AppStore.self) private var store
-    let ggufDirectory: String
-    @State private var models: [LocalModelItem] = []
-    @State private var isScanning = false
-    @State private var modelToRemove: LocalModelItem?
-    @State private var selectedModel: LocalModelItem?
-    @State private var selectedDownloadID: String?
-    @State private var searchText = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search downloaded models", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                }
-            }
-            .padding(12)
-            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
-            if isScanning { ProgressView("Scanning local model caches…") }
-            if filteredModels.isEmpty && !isScanning && !hasActiveDownload {
-                ContentUnavailableView(
-                    searchText.isEmpty ? "No downloaded models" : "No matching models",
-                    systemImage: searchText.isEmpty ? "externaldrive" : "magnifyingglass",
-                    description: Text(searchText.isEmpty ? "Models you download will appear here." : "Try another model name or file name.")
-                )
-            } else {
-                HSplitView {
-                    List {
-                    ForEach(store.downloadJobs.values.sorted { $0.modelID < $1.modelID }) { job in
-                        HStack(spacing: 14) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(job.modelID).font(.headline)
-                                Text(job.file).font(.caption).foregroundStyle(.secondary)
-                                Label(job.phase, systemImage: job.phase.localizedCaseInsensitiveContains("verif") ? "checkmark.shield" : "arrow.down.circle").font(.caption).foregroundStyle(.secondary)
-                                ProgressView(value: job.progress, total: 1)
-                                Text("\(job.progress.formatted(.percent.precision(.fractionLength(1)))) · \(ByteCountFormatter.string(fromByteCount: job.received, countStyle: .file)) of \(job.total > 0 ? ByteCountFormatter.string(fromByteCount: job.total, countStyle: .file) : "unknown size")\(job.speed > 0 ? " · \(ByteCountFormatter.string(fromByteCount: Int64(job.speed), countStyle: .file))/s" : "")").font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button { store.toggleDownloadPause(job.id) } label: { Image(systemName: job.isPaused ? "play.fill" : "pause.fill") }.buttonStyle(.bordered).help(job.isPaused ? "Resume" : "Pause")
-                                .accessibilityLabel(job.isPaused ? "Resume download" : "Pause download")
-                            Button(role: .destructive) { store.cancelDownload(job.id) } label: { Image(systemName: "xmark") }.buttonStyle(.bordered).help("Cancel download")
-                                .accessibilityLabel("Cancel download")
-                        }.padding(.vertical, 9)
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedDownloadID = job.id; selectedModel = nil }
-                            .listRowBackground(selectedDownloadID == job.id ? store.appTheme.accent.opacity(0.14) : Color.clear)
-                    }
-                        ForEach(filteredModels) { model in
-                            HStack(spacing: 14) {
-                                Image(systemName: model.format == .gguf ? "shippingbox" : "apple.logo").frame(width: 28)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(model.name).font(.headline).lineLimit(1)
-                                    HStack(spacing: 5) {
-                                        Text(model.format == .gguf ? "GGUF" : "MLX")
-                                        if model.size > 0 { Text("·"); Text(ByteCountFormatter.string(fromByteCount: model.size, countStyle: .file)) }
-                                        Text("·"); Text(model.path).lineLimit(1)
-                                    }.font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                                }
-                                Spacer()
-                                Button(role: .destructive) { modelToRemove = model } label: { Image(systemName: "trash") }.buttonStyle(.plain).help("Move model to Trash")
-                                    .accessibilityLabel("Move model to Trash")
-                            }
-                            .padding(.vertical, 8)
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedModel = model; selectedDownloadID = nil }
-                            .listRowBackground(selectedModel?.id == model.id ? store.appTheme.accent.opacity(0.14) : Color.clear)
-                        }
-                    }
-                    .frame(minWidth: 430, idealWidth: 620)
-                    if let selectedDownloadID, let job = store.downloadJobs[selectedDownloadID] {
-                        VStack(alignment: .leading, spacing: 18) {
-                            Image(systemName: job.backend == .llamaCPP ? "shippingbox.fill" : "apple.logo").font(.system(size: 38)).foregroundStyle(store.appTheme.accent)
-                            Text(job.modelID).font(.title2).fontWeight(.semibold).textSelection(.enabled)
-                            Label(job.phase, systemImage: job.phase == "Finalizing" ? "checkmark.shield" : "arrow.down.circle")
-                                .foregroundStyle(job.phase == "Finalizing" ? .orange : store.appTheme.accent)
-                            LabeledContent("Format", value: job.backend == .llamaCPP ? "GGUF" : "MLX")
-                            LabeledContent("Version", value: job.file)
-                            LabeledContent("Progress", value: job.progress.formatted(.percent.precision(.fractionLength(1))))
-                            LabeledContent("Downloaded", value: ByteCountFormatter.string(fromByteCount: job.received, countStyle: .file))
-                            LabeledContent("Total", value: job.total > 0 ? ByteCountFormatter.string(fromByteCount: job.total, countStyle: .file) : "Calculating…")
-                            if job.speed > 0 { LabeledContent("Speed", value: "\(ByteCountFormatter.string(fromByteCount: Int64(job.speed), countStyle: .file))/s") }
-                            if !job.destination.isEmpty {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text("Destination").font(.caption).foregroundStyle(.secondary)
-                                    Text(job.destination).font(.caption.monospaced()).textSelection(.enabled)
-                                }
-                            }
-                            Spacer()
-                        }.padding(26).frame(minWidth: 310, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(store.appTheme.background)
-                    } else if let selectedModel {
-                        VStack(alignment: .leading, spacing: 18) {
-                            Image(systemName: selectedModel.format == .gguf ? "shippingbox.fill" : "apple.logo").font(.system(size: 38)).foregroundStyle(store.appTheme.accent)
-                            Text(selectedModel.name).font(.title2).fontWeight(.semibold).textSelection(.enabled)
-                            LabeledContent("Format", value: selectedModel.format == .gguf ? "GGUF" : "MLX")
-                            LabeledContent("Size", value: selectedModel.size > 0 ? ByteCountFormatter.string(fromByteCount: selectedModel.size, countStyle: .file) : "Calculating…")
-                            if let provenance = provenance(for: selectedModel) {
-                                Divider()
-                                Text("Provenance").font(.headline)
-                                if let url = ModelProvenance.repositoryURL(for: provenance.sourceModelID) {
-                                    LabeledContent("Repository") { Link(provenance.sourceModelID, destination: url) }
-                                } else {
-                                    LabeledContent("Repository", value: provenance.sourceModelID.isEmpty ? "Unknown" : provenance.sourceModelID)
-                                }
-                                if let revision = provenance.revision, !revision.isEmpty {
-                                    LabeledContent("Revision") {
-                                        if let url = ModelProvenance.revisionURL(for: provenance) { Link(String(revision.prefix(12)), destination: url) }
-                                        else { Text(String(revision.prefix(12))) }
-                                    }
-                                } else { LabeledContent("Revision", value: "Unknown") }
-                                LabeledContent("License", value: provenance.license?.uppercased() ?? "Unknown")
-                                LabeledContent("Quantization", value: provenance.quantization ?? ModelProvenance.quantization(from: selectedModel.name) ?? (selectedModel.format == .mlx ? "MLX" : "Unknown"))
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Label(provenance.checksumVerified == true ? "SHA-256 verified" : "Checksum not verified", systemImage: provenance.checksumVerified == true ? "checkmark.shield.fill" : "exclamationmark.shield")
-                                        .foregroundStyle(provenance.checksumVerified == true ? .green : .orange)
-                                    Text(provenance.checksumSHA256 ?? "No checksum recorded")
-                                        .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                                }
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("Location").font(.caption).foregroundStyle(.secondary)
-                                Text(selectedModel.path).font(.caption.monospaced()).textSelection(.enabled)
-                            }
-                            } else {
-                                Divider()
-                                Label("Provenance unavailable for this legacy or externally added model", systemImage: "questionmark.diamond")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text("Location").font(.caption).foregroundStyle(.secondary)
-                                    Text(selectedModel.path).font(.caption.monospaced()).textSelection(.enabled)
-                                }
-                            }
-                            Spacer()
-                        }.padding(26).frame(minWidth: 310, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(store.appTheme.background)
-                    } else {
-                        ContentUnavailableView("Select a downloaded model", systemImage: "shippingbox", description: Text("Choose a model to see its format, size, and local location."))
-                            .frame(minWidth: 310, maxWidth: .infinity, maxHeight: .infinity).background(store.appTheme.background)
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding().task { scan() }
-        .onChange(of: store.isDownloading) { _, active in if !active { scan() } }
-        .onChange(of: store.downloadJobs.count) { _, _ in
-            scan()
-            if let selectedDownloadID, store.downloadJobs[selectedDownloadID] == nil { self.selectedDownloadID = nil }
-        }
-        .onChange(of: store.serverLifecycle) { _, lifecycle in if lifecycle == .running { scan() } }
-        .onChange(of: searchText) { _, _ in
-            if let selectedModel, !filteredModels.contains(where: { $0.id == selectedModel.id }) {
-                self.selectedModel = nil
-            }
-        }
-        .alert("Remove downloaded model?", isPresented: Binding(get: { modelToRemove != nil }, set: { if !$0 { modelToRemove = nil } })) {
-            Button("Move to Trash", role: .destructive) { if let model = modelToRemove { remove(model) }; modelToRemove = nil }
-            Button("Cancel", role: .cancel) { modelToRemove = nil }
-        } message: { Text("The model will be moved to the Trash. Profiles that reference it will remain, but cannot start until another model is selected.") }
-    }
-
-    private var hasActiveDownload: Bool { store.isDownloading || store.isResolvingDownload || store.serverLifecycle == .downloading }
-    private func provenance(for model: LocalModelItem) -> ModelManifestEntry? {
-        store.modelManifestEntries.first {
-            URL(fileURLWithPath: $0.localPath).standardizedFileURL.path == URL(fileURLWithPath: model.path).standardizedFileURL.path
-                || ($0.filename.caseInsensitiveCompare(model.name) == .orderedSame && FileManager.default.fileExists(atPath: $0.localPath))
-        }
-    }
-    private var filteredModels: [LocalModelItem] {
-        let query = normalizedSearchText(searchText)
-        guard !query.isEmpty else { return models }
-        return models.filter {
-            normalizedSearchText($0.name).contains(query)
-                || normalizedSearchText($0.path).contains(query)
-        }
-    }
-
-    private func normalizedSearchText(_ value: String) -> String {
-        value
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .replacingOccurrences(of: "_", with: "-")
-            .replacingOccurrences(of: " ", with: "-")
-    }
-    private var activeDownloadName: String {
-        if store.isDownloading { return store.downloadModelName.isEmpty ? "Downloading model" : store.downloadModelName }
-        if store.isResolvingDownload { return store.downloadStatus.isEmpty ? "Finding model…" : store.downloadStatus }
-        return store.profiles.first(where: { $0.id == store.runningProfileID })?.name ?? "MLX model"
-    }
-
-    private func remove(_ model: LocalModelItem) {
-        let item = URL(fileURLWithPath: model.path)
-        let target = model.format == .mlx ? item.deletingLastPathComponent().deletingLastPathComponent() : item
-        NSWorkspace.shared.recycle([target]) { _, error in
-            DispatchQueue.main.async {
-                if let error { store.errorMessage = "Could not move the model to Trash: \(error.localizedDescription)" }
-                scan()
-            }
-        }
-    }
-
-    private func scan() {
-        isScanning = true
-        let ggufRoot = NSString(string: ggufDirectory).expandingTildeInPath
-        models = DownloadedModelCatalog.scan(root: URL(fileURLWithPath: ggufRoot, isDirectory: true)).map {
-            .init(id: $0.path, name: $0.name, path: $0.path, format: $0.format == .gguf ? .gguf : .mlx, size: $0.size)
-        }
-        isScanning = false
-    }
-}
 
 private struct ModelCard: View {
     let model: HFModel
@@ -1434,8 +1353,22 @@ private struct ModelCard: View {
     private var name: String { model.id.split(separator: "/").last.map(String.init) ?? model.id }
     private var author: String { model.id.split(separator: "/").first.map(String.init) ?? "Community" }
     private var visibleTags: [String] {
-        let preferred = ["thinking", "vision", "tools", "multilingual", "code", "text-generation"]
+        // "vision" used to be in this list, sourced from Hugging Face's own
+        // tags -- dropped in favor of hasVisionSupport below, which checks
+        // for an actual mmproj sibling file instead of a tag that's often
+        // missing or stale on a GGUF requant repo (see
+        // MultimodalProjector.hasProjectorSibling's doc comment).
+        let preferred = ["thinking", "tools", "multilingual", "code", "text-generation"]
         return preferred.filter { tag in model.tags?.contains(where: { $0.localizedCaseInsensitiveContains(tag) }) == true }.prefix(3).map { $0 }
+    }
+    /// Whether this repo actually ships a vision projector file, checked
+    /// against its real sibling file list rather than Hugging Face's tag
+    /// metadata -- every search path that produces a ModelCard already
+    /// requests `siblings` (either via `full=true` on a list query, or for
+    /// free on a single-model lookup), so this is reliable wherever a card
+    /// is shown.
+    private var hasVisionSupport: Bool {
+        MultimodalProjector.hasProjectorSibling(among: (model.siblings ?? []).map(\.rfilename))
     }
 
     var body: some View {
@@ -1483,6 +1416,10 @@ private struct ModelCard: View {
     private func tagRow(limit: Int) -> some View {
         HStack(spacing: 7) {
             Text(backend == .llamaCPP ? "GGUF" : "MLX").modelBadge().fixedSize()
+            if hasVisionSupport {
+                Label("Vision", systemImage: "eye").foregroundStyle(.blue).font(.caption2).fixedSize().modelBadge()
+                    .help("Ships a vision projector file, so it can accept image input")
+            }
             if !isRuntimeSupported {
                 Label("Runtime unavailable", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange).font(.caption2).fixedSize()
@@ -1505,6 +1442,22 @@ private struct ModelCard: View {
 }
 
 private extension View {
+    /// Every top-level window's own root view attaches this, so a
+    /// background error set on AppStore.errorMessage -- a blocked chat
+    /// image attachment, a failed Homebrew install, a failed chat
+    /// export, and so on -- is always shown somewhere. Previously only
+    /// ModelStoreWindowView had an `.alert` wired up to errorMessage, so
+    /// the same errorMessage silently did nothing at all unless the
+    /// Model Store window happened to be the one open -- dropping an
+    /// image into the Chat window while its model's projector was still
+    /// downloading, for instance, looked like it did nothing, when it
+    /// had actually started fetching the projector and set an
+    /// explanatory message nobody could see.
+    func inferenceBarErrorAlert(_ store: AppStore) -> some View {
+        alert("InferenceBar", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
+            Button("OK") { store.errorMessage = nil }
+        } message: { Text(store.errorMessage ?? "") }
+    }
     func modelBadge() -> some View { padding(.horizontal, 7).padding(.vertical, 3).background(.quaternary, in: Capsule()).font(.caption2) }
     func modelFitBadge(_ fit: ModelFit) -> some View {
         foregroundStyle(fit == .comfortable ? Color.green : (fit == .tight ? Color.orange : Color.red))
@@ -1545,6 +1498,297 @@ private struct ScrollWheelObserver: NSViewRepresentable {
             }
         }
         func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil }
+    }
+}
+
+/// A dedicated window for every in-progress download (GGUF or MLX,
+/// started from a profile preset or the Model Store) -- previously this
+/// list only existed embedded inside the Model Store's "Downloaded"
+/// area, so it was invisible unless you happened to have that window
+/// open to that exact section. store.downloadJobs already tracks every
+/// kind of download uniformly (see AppStore.DownloadJob), so this is
+/// purely a focused presentation of state that already existed.
+/// A dedicated window for both every in-progress download (GGUF or MLX,
+/// started from a profile preset or the Model Store) and every model
+/// already downloaded -- these used to be split across this window's
+/// "Downloading" list and the Model Store's separate "Downloaded" area,
+/// which meant checking on a finished download or removing an old model
+/// meant switching windows. Folding both into one "Downloading"/
+/// "Downloaded" pair of sections here means the Model Store's model
+/// browser only has to be about finding and starting new downloads.
+struct DownloadsView: View {
+    @Environment(AppStore.self) private var store
+    @AppStorage("modelDirectory") private var directory = "~/ai-models"
+    @State private var models: [LocalModelItem] = []
+    @State private var isScanning = false
+    @State private var modelToRemove: LocalModelItem?
+    @State private var selectedModel: LocalModelItem?
+    @State private var selectedDownloadID: String?
+    @State private var searchText = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Circle().fill(store.downloadJobs.isEmpty ? Color.secondary : Color.blue).frame(width: 9)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Downloads").font(.title2).fontWeight(.semibold)
+                    Text(store.downloadJobs.isEmpty ? "No active downloads" : "\(store.downloadJobs.count) active").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }.padding()
+            if store.queuedPresetDownloadCount > 0 {
+                Text("\(store.queuedPresetDownloadCount) more queued — presets download one at a time so their progress doesn't overlap")
+                    .font(.caption2).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8)
+            }
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search downloaded models", text: $searchText).textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Clear search")
+                }
+            }.padding(10).background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal).padding(.bottom, 10)
+            Divider()
+            if store.downloadJobs.isEmpty && filteredModels.isEmpty && !isScanning && !hasActiveDownload {
+                ContentUnavailableView(
+                    searchText.isEmpty ? "No downloads yet" : "No matching models",
+                    systemImage: searchText.isEmpty ? "arrow.down.circle" : "magnifyingglass",
+                    description: Text(searchText.isEmpty ? "Downloads started from Profiles or the Model Store will appear here, and finished ones stay listed below." : "Try another model or file name.")
+                )
+            } else {
+                HSplitView {
+                    List {
+                        if !store.downloadJobs.isEmpty {
+                            Section("Downloading") {
+                                ForEach(store.downloadJobs.values.sorted { $0.modelID < $1.modelID }) { job in
+                                    DownloadJobRow(job: job)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture { selectedDownloadID = job.id; selectedModel = nil }
+                                        .listRowBackground(selectedDownloadID == job.id ? store.appTheme.accent.opacity(0.14) : Color.clear)
+                                }
+                            }
+                        }
+                        Section("Downloaded") {
+                            if filteredModels.isEmpty {
+                                Text(isScanning ? "Scanning local model caches…" : (searchText.isEmpty ? "No downloaded models yet" : "No matching models"))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            ForEach(filteredModels) { model in
+                                DownloadedModelRow(model: model, hasVisionSupport: MultimodalProjector.path(forModelPath: model.path) != nil, onRemove: { modelToRemove = model })
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { selectedModel = model; selectedDownloadID = nil }
+                                    .listRowBackground(selectedModel?.id == model.id ? store.appTheme.accent.opacity(0.14) : Color.clear)
+                            }
+                        }
+                    }
+                    .listStyle(.inset)
+                    .frame(minWidth: 430, idealWidth: 620)
+                    if let selectedDownloadID, let job = store.downloadJobs[selectedDownloadID] {
+                        VStack(alignment: .leading, spacing: 18) {
+                            Image(systemName: job.backend == .llamaCPP ? "shippingbox.fill" : "apple.logo").font(.system(size: 38)).foregroundStyle(store.appTheme.accent)
+                            Text(job.modelID).font(.title2).fontWeight(.semibold).textSelection(.enabled)
+                            Label(job.phase, systemImage: job.phase == "Finalizing" ? "checkmark.shield" : "arrow.down.circle")
+                                .foregroundStyle(job.phase == "Finalizing" ? .orange : store.appTheme.accent)
+                            LabeledContent("Format", value: job.backend == .llamaCPP ? "GGUF" : "MLX")
+                            LabeledContent("Version", value: job.file)
+                            LabeledContent("Progress", value: job.progress.formatted(.percent.precision(.fractionLength(1))))
+                            LabeledContent("Downloaded", value: ByteCountFormatter.string(fromByteCount: job.received, countStyle: .file))
+                            LabeledContent("Total", value: job.total > 0 ? ByteCountFormatter.string(fromByteCount: job.total, countStyle: .file) : "Calculating…")
+                            if job.speed > 0 { LabeledContent("Speed", value: "\(ByteCountFormatter.string(fromByteCount: Int64(job.speed), countStyle: .file))/s") }
+                            if !job.destination.isEmpty {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Destination").font(.caption).foregroundStyle(.secondary)
+                                    Text(job.destination).font(.caption.monospaced()).textSelection(.enabled)
+                                }
+                            }
+                            Spacer()
+                        }.padding(26).frame(minWidth: 310, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(store.appTheme.background)
+                    } else if let selectedModel {
+                        VStack(alignment: .leading, spacing: 18) {
+                            Image(systemName: selectedModel.format == .gguf ? "shippingbox.fill" : "apple.logo").font(.system(size: 38)).foregroundStyle(store.appTheme.accent)
+                            Text(selectedModel.name).font(.title2).fontWeight(.semibold).textSelection(.enabled)
+                            LabeledContent("Format", value: selectedModel.format == .gguf ? "GGUF" : "MLX")
+                            LabeledContent("Size", value: selectedModel.size > 0 ? ByteCountFormatter.string(fromByteCount: selectedModel.size, countStyle: .file) : "Calculating…")
+                            if selectedModel.format == .gguf {
+                                Label(MultimodalProjector.path(forModelPath: selectedModel.path) != nil ? "Vision-capable (projector found)" : "No vision projector found", systemImage: MultimodalProjector.path(forModelPath: selectedModel.path) != nil ? "eye" : "eye.slash")
+                                    .font(.caption).foregroundStyle(MultimodalProjector.path(forModelPath: selectedModel.path) != nil ? .blue : .secondary)
+                            }
+                            if let provenance = provenance(for: selectedModel) {
+                                Divider()
+                                Text("Provenance").font(.headline)
+                                if let url = ModelProvenance.repositoryURL(for: provenance.sourceModelID) {
+                                    LabeledContent("Repository") { Link(provenance.sourceModelID, destination: url) }
+                                } else {
+                                    LabeledContent("Repository", value: provenance.sourceModelID.isEmpty ? "Unknown" : provenance.sourceModelID)
+                                }
+                                if let revision = provenance.revision, !revision.isEmpty {
+                                    LabeledContent("Revision") {
+                                        if let url = ModelProvenance.revisionURL(for: provenance) { Link(String(revision.prefix(12)), destination: url) }
+                                        else { Text(String(revision.prefix(12))) }
+                                    }
+                                } else { LabeledContent("Revision", value: "Unknown") }
+                                LabeledContent("License", value: provenance.license?.uppercased() ?? "Unknown")
+                                LabeledContent("Quantization", value: provenance.quantization ?? ModelProvenance.quantization(from: selectedModel.name) ?? (selectedModel.format == .mlx ? "MLX" : "Unknown"))
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Label(provenance.checksumVerified == true ? "SHA-256 verified" : "Checksum not verified", systemImage: provenance.checksumVerified == true ? "checkmark.shield.fill" : "exclamationmark.shield")
+                                        .foregroundStyle(provenance.checksumVerified == true ? .green : .orange)
+                                    Text(provenance.checksumSHA256 ?? "No checksum recorded")
+                                        .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Location").font(.caption).foregroundStyle(.secondary)
+                                Text(selectedModel.path).font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                            } else {
+                                Divider()
+                                Label("Provenance unavailable for this legacy or externally added model", systemImage: "questionmark.diamond")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Location").font(.caption).foregroundStyle(.secondary)
+                                    Text(selectedModel.path).font(.caption.monospaced()).textSelection(.enabled)
+                                }
+                            }
+                            Spacer()
+                        }.padding(26).frame(minWidth: 310, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(store.appTheme.background)
+                    } else {
+                        ContentUnavailableView("Select an item", systemImage: "shippingbox", description: Text("Choose a download or a downloaded model to see its details."))
+                            .frame(minWidth: 310, maxWidth: .infinity, maxHeight: .infinity).background(store.appTheme.background)
+                    }
+                }
+            }
+        }
+        .background(store.appTheme.background)
+        .navigationTitle("Downloads")
+        .task { scan() }
+        .onChange(of: store.isDownloading) { _, active in if !active { scan() } }
+        .onChange(of: store.downloadJobs.count) { _, _ in
+            scan()
+            if let selectedDownloadID, store.downloadJobs[selectedDownloadID] == nil { self.selectedDownloadID = nil }
+        }
+        .onChange(of: store.serverLifecycle) { _, lifecycle in if lifecycle == .running { scan() } }
+        .onChange(of: searchText) { _, _ in
+            if let selectedModel, !filteredModels.contains(where: { $0.id == selectedModel.id }) {
+                self.selectedModel = nil
+            }
+        }
+        .alert("Remove downloaded model?", isPresented: Binding(get: { modelToRemove != nil }, set: { if !$0 { modelToRemove = nil } })) {
+            Button("Move to Trash", role: .destructive) { if let model = modelToRemove { remove(model) }; modelToRemove = nil }
+            Button("Cancel", role: .cancel) { modelToRemove = nil }
+        } message: { Text("The model will be moved to the Trash. Profiles that reference it will remain, but cannot start until another model is selected.") }
+        .inferenceBarErrorAlert(store)
+    }
+
+    private var hasActiveDownload: Bool { store.isDownloading || store.isResolvingDownload || store.serverLifecycle == .downloading }
+    private func provenance(for model: LocalModelItem) -> ModelManifestEntry? {
+        store.modelManifestEntries.first {
+            URL(fileURLWithPath: $0.localPath).standardizedFileURL.path == URL(fileURLWithPath: model.path).standardizedFileURL.path
+                || ($0.filename.caseInsensitiveCompare(model.name) == .orderedSame && FileManager.default.fileExists(atPath: $0.localPath))
+        }
+    }
+    private var filteredModels: [LocalModelItem] {
+        // A GGUF download's destination file exists on disk (pre-allocated
+        // for the parallel range-request downloader) well before it
+        // finishes, so a model whose file is also an active download's
+        // destination must be excluded here -- otherwise it shows up in
+        // both "Downloading" above and "Downloaded" below at once.
+        let activeDestinations = Set(store.downloadJobs.values.map { URL(fileURLWithPath: $0.destination).standardizedFileURL.path }.filter { !$0.isEmpty })
+        let settled = models.filter { !activeDestinations.contains(URL(fileURLWithPath: $0.path).standardizedFileURL.path) }
+        let query = normalizedSearchText(searchText)
+        guard !query.isEmpty else { return settled }
+        return settled.filter {
+            normalizedSearchText($0.name).contains(query)
+                || normalizedSearchText($0.path).contains(query)
+        }
+    }
+
+    private func normalizedSearchText(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .replacingOccurrences(of: "_", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+    }
+
+    private func remove(_ model: LocalModelItem) {
+        let item = URL(fileURLWithPath: model.path)
+        let target = model.format == .mlx ? item.deletingLastPathComponent().deletingLastPathComponent() : item
+        NSWorkspace.shared.recycle([target]) { _, error in
+            DispatchQueue.main.async {
+                if let error { store.errorMessage = "Could not move the model to Trash: \(error.localizedDescription)" }
+                scan()
+            }
+        }
+    }
+
+    private func scan() {
+        isScanning = true
+        let ggufRoot = NSString(string: directory).expandingTildeInPath
+        models = DownloadedModelCatalog.scan(root: URL(fileURLWithPath: ggufRoot, isDirectory: true)).map {
+            .init(id: $0.path, name: $0.name, path: $0.path, format: $0.format == .gguf ? .gguf : .mlx, size: $0.size)
+        }
+        isScanning = false
+    }
+}
+
+private struct DownloadJobRow: View {
+    @Environment(AppStore.self) private var store
+    let job: AppStore.DownloadJob
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: job.backend == .llamaCPP ? "shippingbox" : "apple.logo").frame(width: 28)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(job.modelID).font(.headline)
+                Text(job.file).font(.caption).foregroundStyle(.secondary)
+                Label(job.phase, systemImage: job.phase.localizedCaseInsensitiveContains("verif") ? "checkmark.shield" : "arrow.down.circle").font(.caption).foregroundStyle(.secondary)
+                ProgressView(value: job.progress, total: 1)
+                Text("\(job.progress.formatted(.percent.precision(.fractionLength(1)))) · \(ByteCountFormatter.string(fromByteCount: job.received, countStyle: .file)) of \(job.total > 0 ? ByteCountFormatter.string(fromByteCount: job.total, countStyle: .file) : "unknown size")\(job.speed > 0 ? " · \(ByteCountFormatter.string(fromByteCount: Int64(job.speed), countStyle: .file))/s" : "")")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !job.destination.isEmpty {
+                    Text(job.destination).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                }
+            }
+            Spacer()
+            Button { store.toggleDownloadPause(job.id) } label: { Image(systemName: job.isPaused ? "play.fill" : "pause.fill") }
+                .buttonStyle(.bordered).help(job.isPaused ? "Resume" : "Pause")
+                .accessibilityLabel(job.isPaused ? "Resume download" : "Pause download")
+            Button(role: .destructive) { store.cancelDownload(job.id) } label: { Image(systemName: "xmark") }
+                .buttonStyle(.bordered).help("Cancel download")
+                .accessibilityLabel("Cancel download")
+        }.padding(.vertical, 9)
+    }
+}
+
+private struct DownloadedModelRow: View {
+    let model: LocalModelItem
+    /// Computed by the caller against the actual directory listing (see
+    /// MultimodalProjector.path(forModelPath:)) rather than any tag --
+    /// the same ground-truth check the running server itself uses to
+    /// decide whether it can wire up `--mmproj` for this model.
+    let hasVisionSupport: Bool
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: model.format == .gguf ? "shippingbox" : "apple.logo").frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(model.name).font(.headline).lineLimit(1)
+                    if hasVisionSupport {
+                        Label("Vision", systemImage: "eye").font(.caption2).foregroundStyle(.blue).modelBadge()
+                            .help("A vision projector file is available for this model, so it can accept image input")
+                    }
+                }
+                HStack(spacing: 5) {
+                    Text(model.format == .gguf ? "GGUF" : "MLX")
+                    if model.size > 0 { Text("·"); Text(ByteCountFormatter.string(fromByteCount: model.size, countStyle: .file)) }
+                    Text("·"); Text(model.path).lineLimit(1)
+                }.font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            Spacer()
+            Button(role: .destructive) { onRemove() } label: { Image(systemName: "trash") }.buttonStyle(.plain).help("Move model to Trash")
+                .accessibilityLabel("Move model to Trash")
+        }
+        .padding(.vertical, 8)
     }
 }
 
@@ -1594,6 +1838,7 @@ struct LogsView: View {
                 }.background(store.appTheme.surface).clipShape(RoundedRectangle(cornerRadius: 10)).padding()
             }
         }.background(store.appTheme.background).navigationTitle("Logs")
+        .inferenceBarErrorAlert(store)
     }
 }
 
@@ -1612,6 +1857,12 @@ struct PromptView: View {
     @State private var isChatDropTargeted = false
     @State private var editingMessageID: UUID?
     @State private var messageEditDraft = ""
+    @State private var chatToDelete: SavedChat?
+    @State private var showsSessionStats = false
+    // Tracks the scroll viewport's actual width so the composer below it
+    // (measured separately, outside that GeometryReader) can size itself
+    // to match -- see ChatColumnLayout.maxWidth(forViewportWidth:).
+    @State private var chatViewportWidth: CGFloat = 760
 
     var body: some View {
         @Bindable var store = store
@@ -1624,6 +1875,11 @@ struct PromptView: View {
                     Button { store.clearConversation() } label: { Image(systemName: "square.and.pencil") }.buttonStyle(.plain).help("New chat")
                     .accessibilityLabel("New chat")
                     Spacer()
+                    if runningProfile != nil || !store.messages.isEmpty {
+                        Button { showsSessionStats = true } label: { Image(systemName: "chart.bar.doc.horizontal") }
+                            .buttonStyle(.plain).help("Session stats").accessibilityLabel("Session stats")
+                            .popover(isPresented: $showsSessionStats) { chatSessionStatsPanel }
+                    }
                     contextUsageBadge
                     if let running = runningProfile {
                         HStack(spacing: 6) { Circle().fill(.green).frame(width: 8, height: 8); Text(running.chatDisplayName).lineLimit(1) }.font(.caption).foregroundStyle(.secondary)
@@ -1650,7 +1906,7 @@ struct PromptView: View {
                                     .background(GeometryReader { tail in
                                         Color.clear.preference(key: ChatTailPositionKey.self, value: tail.frame(in: .named("prompt-chat-scroll")).maxY)
                                     })
-                            }.frame(maxWidth: 760).padding(.horizontal, 28).padding(.vertical, 32).frame(maxWidth: .infinity)
+                            }.frame(maxWidth: ChatColumnLayout.maxWidth(forViewportWidth: viewport.size.width)).padding(.horizontal, 28).padding(.vertical, 32).frame(maxWidth: .infinity)
                         }
                     }.coordinateSpace(name: "prompt-chat-scroll")
                     .simultaneousGesture(DragGesture(minimumDistance: 3).onChanged { value in
@@ -1661,6 +1917,8 @@ struct PromptView: View {
                         let visible = tailY > 0 && tailY <= viewport.size.height + 8
                         followsChatTail = ChatTailPolicy.shouldFollow(currentlyFollowing: followsChatTail, bottomIsVisible: visible, userScrolledUp: false)
                     }
+                    .onAppear { chatViewportWidth = viewport.size.width }
+                    .onChange(of: viewport.size.width) { _, width in chatViewportWidth = width }
                     .onChange(of: latestMessageContent) { _, _ in scrollChatToBottom(proxy) }
                     .onChange(of: store.messages.count) { _, _ in scrollChatToBottom(proxy, force: true) }
                     .onChange(of: store.isSending) { _, sending in if sending { scrollChatToBottom(proxy, force: true) } }
@@ -1676,10 +1934,11 @@ struct PromptView: View {
                 }
 
                 chatComposer
-                    .frame(maxWidth: showsSidebar ? 760 : 900)
+                    .frame(maxWidth: ChatColumnLayout.maxWidth(forViewportWidth: chatViewportWidth))
                     .padding(.horizontal, 28).padding(.bottom, 18)
             }.frame(minWidth: 480).background(store.appTheme.background)
         }.background(store.appTheme.background).navigationTitle("Chat")
+        .inferenceBarErrorAlert(store)
     }
 
     private var runningProfile: ServerProfile? { store.profiles.first { $0.id == store.runningProfileID } }
@@ -1702,6 +1961,39 @@ struct PromptView: View {
         }
     }
     private var latestMessageContent: String { store.messages.last?.content ?? "" }
+
+    private var currentChatElapsedSeconds: TimeInterval {
+        guard let chat = store.chats.first(where: { $0.id == store.activeChatID }) else { return 0 }
+        return store.chatElapsedSeconds(chat)
+    }
+
+    /// A fuller session view than the header's compact context badge --
+    /// reuses RuntimeHealthPanel (the same server-level stats already
+    /// shown in the Profiles window's "Runtime health" section: memory,
+    /// uptime, active requests, generation speed, context usage) plus
+    /// two stats specific to this conversation that RuntimeHealthPanel
+    /// has no notion of. Shown in a popover so it's available without
+    /// permanently spending header space on numbers most people only
+    /// check occasionally.
+    @ViewBuilder private var chatSessionStatsPanel: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Session Stats").font(.headline)
+            if runningProfile != nil {
+                RuntimeHealthPanel(health: store.runtimeHealth, lifecycle: store.serverLifecycle)
+                Divider()
+            }
+            HStack(spacing: 28) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("Messages", systemImage: "text.bubble").font(.caption).foregroundStyle(.secondary)
+                    Text("\(store.messages.count)").font(.body.monospacedDigit())
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("Chat length", systemImage: "clock.badge").font(.caption).foregroundStyle(.secondary)
+                    Text(chatDuration(currentChatElapsedSeconds)).font(.body.monospacedDigit())
+                }
+            }
+        }.padding(18).frame(width: 360)
+    }
 
     private var chatSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1754,6 +2046,16 @@ struct PromptView: View {
             Button("Save") { if let id = editingProjectID { store.renameChatProject(id, to: editText) }; editingProjectID = nil }
             Button("Cancel", role: .cancel) { editingProjectID = nil }
         }
+        .confirmationDialog(
+            "Delete “\(chatToDelete?.title ?? "this chat")”?",
+            isPresented: Binding(get: { chatToDelete != nil }, set: { if !$0 { chatToDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { if let chat = chatToDelete { store.deleteChat(chat.id) }; chatToDelete = nil }
+            Button("Cancel", role: .cancel) { chatToDelete = nil }
+        } message: {
+            Text("This removes the chat and its messages permanently. This can't be undone.")
+        }
     }
 
     private var filteredChats: [SavedChat] {
@@ -1779,7 +2081,7 @@ struct PromptView: View {
                 ForEach(store.chatProjects) { project in Button(project.name) { store.moveChat(chat.id, to: project.id) } }
             }
             Button("Export as Markdown…") { exportChat(chat) }
-            Button("Delete", role: .destructive) { store.deleteChat(chat.id) }
+            Button("Delete", role: .destructive) { chatToDelete = chat }
         }
     }
 
@@ -1845,7 +2147,7 @@ struct PromptView: View {
                         if isLast && !isStreaming {
                             Button { store.regenerateLastResponse() } label: { Image(systemName: "arrow.counterclockwise") }
                                 .help("Regenerate response").accessibilityLabel("Regenerate response")
-                                .disabled(store.isSending || !store.isRunning)
+                                .disabled(store.isSending || store.serverLifecycle != .running)
                         }
                     }.buttonStyle(.plain).foregroundStyle(.secondary)
                 }
@@ -1905,7 +2207,7 @@ struct PromptView: View {
                 }
                 Button { submitPrompt() } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
                     .help("Send message").accessibilityLabel("Send message")
-                    .buttonStyle(.plain).disabled((store.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.pendingChatAttachments.isEmpty && store.pendingChatImageAttachments.isEmpty) || store.isSending || !store.isRunning)
+                    .buttonStyle(.plain).disabled((store.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.pendingChatAttachments.isEmpty && store.pendingChatImageAttachments.isEmpty) || store.isSending || store.serverLifecycle != .running)
             }
         }.padding(.horizontal, 16).padding(.vertical, 10).background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 24))
             .overlay(RoundedRectangle(cornerRadius: 24).stroke(isChatDropTargeted ? Color.accentColor : .clear, lineWidth: 2))
@@ -1928,7 +2230,7 @@ struct PromptView: View {
     }
 
     private func submitPrompt() {
-        guard !store.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.pendingChatAttachments.isEmpty || !store.pendingChatImageAttachments.isEmpty, store.isRunning, !store.isSending else { return }
+        guard !store.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.pendingChatAttachments.isEmpty || !store.pendingChatImageAttachments.isEmpty, store.serverLifecycle == .running, !store.isSending else { return }
         followsChatTail = true
         store.beginSendingPrompt()
     }
@@ -1998,10 +2300,6 @@ private struct ChatAttachmentStrip: View {
                             }.font(.caption).padding(.horizontal, 9).padding(.vertical, 6).background(.quaternary, in: Capsule())
                         }
                     }
-                }
-                if !store.pendingChatImageAttachments.isEmpty && store.runningProfileLacksVisionProjector {
-                    Label("The running profile has no vision projector — it likely won't see this image.", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2).foregroundStyle(.orange)
                 }
             }
         }
@@ -2286,7 +2584,7 @@ struct AssistantPopoverView: View {
                                                 Button { store.regenerateLastResponse() } label: { Image(systemName: "arrow.counterclockwise") }
                                                     .buttonStyle(.plain).foregroundStyle(.secondary).font(.caption2)
                                                     .help("Regenerate response").accessibilityLabel("Regenerate response")
-                                                    .disabled(store.isSending || !store.isRunning)
+                                                    .disabled(store.isSending || store.serverLifecycle != .running)
                                             }
                                         }
                                     }
@@ -2352,7 +2650,7 @@ struct AssistantPopoverView: View {
                     }
                     Button { submitPopoverPrompt() } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
                         .help("Send message").accessibilityLabel("Send message")
-                        .buttonStyle(.plain).disabled((store.prompt.isEmpty && store.pendingChatAttachments.isEmpty && store.pendingChatImageAttachments.isEmpty) || store.isSending || !store.isRunning)
+                        .buttonStyle(.plain).disabled((store.prompt.isEmpty && store.pendingChatAttachments.isEmpty && store.pendingChatImageAttachments.isEmpty) || store.isSending || store.serverLifecycle != .running)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 11)
                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
@@ -2371,6 +2669,7 @@ struct AssistantPopoverView: View {
         }
         .frame(width: 560, height: 660)
         .background(Color(nsColor: .windowBackgroundColor))
+        .inferenceBarErrorAlert(store)
     }
 
     private func markdown(_ content: String) -> AttributedString {
@@ -2418,7 +2717,7 @@ struct AssistantPopoverView: View {
     }
 
     private func submitPopoverPrompt() {
-        guard (!store.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.pendingChatAttachments.isEmpty || !store.pendingChatImageAttachments.isEmpty), store.isRunning, !store.isSending else { return }
+        guard (!store.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.pendingChatAttachments.isEmpty || !store.pendingChatImageAttachments.isEmpty), store.serverLifecycle == .running, !store.isSending else { return }
         followsChatTail = true
         store.beginSendingPrompt()
     }

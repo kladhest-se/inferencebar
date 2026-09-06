@@ -1,6 +1,6 @@
 import Foundation
 
-/// What `inferencebar <args>` should do, decided from argv alone — kept
+/// What `inference <args>` should do, decided from argv alone — kept
 /// separate from CLI.swift so it's testable without touching stdin, the
 /// network, or the process exit path.
 enum AskArguments {
@@ -22,7 +22,7 @@ enum AskArguments {
         if first == "--help" || first == "-h" { return .help }
         guard first == "ask" else { return .unknownCommand(first) }
         let rest = Array(arguments.dropFirst())
-        // Joining multiple words lets an unquoted "inferencebar ask
+        // Joining multiple words lets an unquoted "inference ask
         // what time is it" work the same as one quoted argument — a
         // small convenience with no real downside, since a prompt with
         // meaningful newlines or leading/trailing whitespace can still

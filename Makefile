@@ -52,8 +52,8 @@ help:
 	@echo "  make macos-release   Create a signed release ZIP in outputs/"
 	@echo "  make macos-package   Create a signed release DMG in outputs/"
 	@echo "  make macos-archive   Create a source archive in outputs/"
-	@echo "  make cli             Build the inferencebar-cli command-line tool"
-	@echo "  make install-cli     Build the CLI and install it on your PATH as 'inferencebar'"
+	@echo "  make cli             Build the inference-cli command-line tool"
+	@echo "  make install-cli     Build the CLI and install it on your PATH as 'inference'"
 	@echo "  make clean           Remove local build and packaging products"
 	@echo "  make signing-identities  List available signing identities"
 	@echo "  make notarize-help   Explain notarizing macos-package/macos-release for real"
@@ -80,7 +80,7 @@ macos-app: all
 	cp work/Info.plist "$(APP_CONTENTS)/Info.plist"
 	cp Assets/AppIcons/AppIcon.icns "$(APP_CONTENTS)/Resources/AppIcon.icns"
 	cp Assets/Credits.rtf LICENSE LICENSE.md "$(APP_CONTENTS)/Resources/"
-	cp .build/release/inferencebar-cli "$(APP_CONTENTS)/Resources/inferencebar"
+	cp .build/release/inference-cli "$(APP_CONTENTS)/Resources/inference"
 	codesign --force --deep --options runtime --sign "$(CODESIGN_IDENTITY)" "$(APP_DIR)"
 	codesign --verify --deep --strict --verbose=2 "$(APP_DIR)"
 
@@ -144,7 +144,7 @@ macos-archive:
 # which instead copies the copy already embedded in the app bundle by
 # macos-app above.
 cli:
-	$(CACHE_ENV) swift build -c release $(SWIFT_FLAGS) --product inferencebar-cli
+	$(CACHE_ENV) swift build -c release $(SWIFT_FLAGS) --product inference-cli
 
 # Mirrors the destination logic in CLIInstallPolicy (Models.swift): prefer
 # /opt/homebrew/bin when it's writable (already on PATH for anyone who
@@ -154,9 +154,9 @@ install-cli: cli
 	@dest="/opt/homebrew/bin"; \
 	if [ ! -w "$$dest" ]; then dest="$(HOME)/.local/bin"; fi; \
 	mkdir -p "$$dest"; \
-	cp .build/release/inferencebar-cli "$$dest/inferencebar"; \
-	chmod 755 "$$dest/inferencebar"; \
-	echo "Installed $$dest/inferencebar"; \
+	cp .build/release/inference-cli "$$dest/inference"; \
+	chmod 755 "$$dest/inference"; \
+	echo "Installed $$dest/inference"; \
 	case ":$$PATH:" in \
 		*":$$dest:"*) ;; \
 		*) echo "$$dest is not on your PATH -- add it, or run with the full path." ;; \

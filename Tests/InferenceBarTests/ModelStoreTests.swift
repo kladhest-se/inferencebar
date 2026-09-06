@@ -13,19 +13,17 @@ import XCTest
 /// decides which "Discover"/"Curated"/"Categories" section each area
 /// belongs to and what it searches for. Model-catalog scanning, hardware
 /// fit, and runtime-availability logic already have deep coverage in
-/// DownloadAndModelTests.swift.
+/// DownloadAndModelTests.swift. "Downloaded" used to be one of these
+/// areas (with no search categories, since it just listed what was
+/// already on disk) but moved out of the Model Store entirely into its
+/// own "Downloaded" section in the Downloads window (see DownloadsView
+/// in ContentView.swift), so ModelArea no longer has a case for it.
 final class ModelStoreTests: XCTestCase {
-
-    func testDownloadedAreaHasNoSearchCategories() {
-        // "Downloaded" lists what's already on disk locally; it never
-        // drives a Hugging Face category search.
-        XCTAssertTrue(ModelArea.downloaded.categories.isEmpty)
-    }
 
     func testDiscoverAndCuratedAreasEachMapToExactlyOneCategory() {
         let singleCategoryAreas: [ModelArea] = [
             .trending, .mostDownloaded, .recentlyUpdated,
-            .recommendedCoding, .recommendedChat, .recommendedSystems,
+            .recommendedCoding, .recommendedChat, .recommendedVisionChat, .recommendedSystems,
             .recommendedHomeAutomation, .recommendedAppleSilicon
         ]
         for area in singleCategoryAreas {

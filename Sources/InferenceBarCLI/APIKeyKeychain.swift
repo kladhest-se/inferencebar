@@ -13,7 +13,7 @@ import Security
 /// is a different binary from InferenceBar.app, the very first read can
 /// pop a macOS keychain permission dialog in an interactive session, and
 /// will just fail quietly (returning "") with no GUI session to answer
-/// it in (SSH, a scheduled script, cron). INFERENCEBAR_API_KEY is the
+/// it in (SSH, a scheduled script, cron). INFERENCE_API_KEY is the
 /// reliable path for scripted/headless use once authentication is on.
 enum APIKeyKeychain {
     private static let service = "local.inferencebar.app"

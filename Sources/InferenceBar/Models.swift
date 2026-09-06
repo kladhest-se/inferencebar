@@ -216,17 +216,90 @@ enum MultimodalProjector {
     /// Picks the sibling projector file for a model, given the other
     /// filenames in its directory. Pure and testable on its own —
     /// path(forModelPath:) below does the actual directory listing.
+    ///
+    /// Candidates are additionally required to share the model's own
+    /// "family" tokens (see familyTokens below) unless the candidate's
+    /// own name carries no family tokens at all (a generically-named
+    /// projector like "mmproj-f16.gguf", with nothing to disagree with).
+    /// This app's model folder is flat and shared across every
+    /// downloaded model (see the preset auto-download comments
+    /// elsewhere in this file), so once it holds projectors for more
+    /// than one vision model family, matching "any mmproj file in the
+    /// folder" (the original, simpler rule) can hand llama-server a
+    /// projector built for a completely different model -- which
+    /// crashes it outright on a tensor-shape mismatch rather than just
+    /// failing to see images. Matching by family keeps the common case
+    /// (one model, one same-named projector, or a generic unnamed one)
+    /// working exactly as before, while refusing to pair, say,
+    /// "Qwen3.6-35B-A3B-Q5_K_M.gguf" with "mmproj-Qwen3VL-32B-Instruct-F16.gguf"
+    /// just because both happen to live in ~/ai-models.
     static func projectorFilename(forModel modelFilename: String, siblingFilenames: [String]) -> String? {
         let modelName = modelFilename.lowercased()
+        let modelFamily = Set(familyTokens(modelFilename, isProjector: false))
         let candidates = siblingFilenames.filter { candidate in
             let lower = candidate.lowercased()
-            return lower.hasSuffix(".gguf") && lower.contains("mmproj") && lower != modelName
+            guard lower.hasSuffix(".gguf"), lower.contains("mmproj"), lower != modelName else { return false }
+            let projectorFamily = Set(familyTokens(candidate, isProjector: true))
+            return projectorFamily.isEmpty || projectorFamily == modelFamily
         }
         // More than one projector in the same folder is unusual (a model
         // swapped in without cleaning up the old one) but not impossible
         // -- sorted() keeps the choice deterministic rather than
         // depending on directory-enumeration order.
         return candidates.sorted().first
+    }
+
+    /// Splits a GGUF filename (its stem, extension dropped) into
+    /// lowercase alphanumeric tokens on any run of separator characters,
+    /// so "Qwen_Qwen3.6-35B" and "Qwen-Qwen3-6-35B" tokenize identically
+    /// regardless of which separator convention a given quantizer used.
+    private static func tokenize(_ filename: String) -> [String] {
+        let stem = (filename as NSString).deletingPathExtension.lowercased()
+        return stem.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+    }
+
+    /// Whether a token looks like a quantization/precision marker (Q4,
+    /// Q5_K_M's "q5", Q8_0's "q8", F16, F32, BF16, IQ4_XS's "iq4", ...)
+    /// rather than part of the model's actual name -- once one of these
+    /// turns up, everything after it in the filename is quant/precision
+    /// detail, not model identity.
+    private static func isQuantOrPrecisionMarker(_ token: String) -> Bool {
+        if ["f16", "f32", "bf16", "fp16", "fp32"].contains(token) { return true }
+        return token.range(of: #"^i?q\d+$"#, options: .regularExpression) != nil
+    }
+
+    /// The tokens identifying which model family/size a filename names,
+    /// stopping at the first quant/precision marker -- ["qwen3vl", "32b",
+    /// "instruct"] out of "Qwen3VL-32B-Instruct-Q4_K_M.gguf", not the
+    /// quant tail. A projector filename has its leading "mmproj" token
+    /// dropped first, since that prefix is naming convention, not model
+    /// identity.
+    private static func familyTokens(_ filename: String, isProjector: Bool) -> [String] {
+        var tokens = tokenize(filename)
+        if isProjector, tokens.first == "mmproj" { tokens.removeFirst() }
+        var family: [String] = []
+        for token in tokens {
+            if isQuantOrPrecisionMarker(token) { break }
+            family.append(token)
+        }
+        return family
+    }
+
+    /// Whether a *remote* Hugging Face repo's sibling filenames include a
+    /// vision projector -- unlike projectorFilename above (which picks
+    /// one sibling for an already-chosen local model file), this just
+    /// asks "does this repo ship one at all", to judge a repo before
+    /// anything from it is downloaded. Hugging Face's own pipeline_tag
+    /// metadata on a GGUF requant repo is frequently just
+    /// "text-generation" even when the repo is a straight vision-model
+    /// conversion -- whoever requantized it often doesn't bother
+    /// re-tagging it -- so this file-presence check is the reliable
+    /// signal for "can this GGUF repo actually see images", not the tag.
+    static func hasProjectorSibling(among siblingFilenames: [String]) -> Bool {
+        siblingFilenames.contains { candidate in
+            let lower = candidate.lowercased()
+            return lower.hasSuffix(".gguf") && lower.contains("mmproj")
+        }
     }
 
     static func path(forModelPath modelPath: String, fileManager: FileManager = .default) -> String? {
@@ -290,6 +363,48 @@ enum DownloadResumeStore {
 
     static func remove(for destination: URL) {
         try? FileManager.default.removeItem(at: url(for: destination))
+    }
+}
+
+/// Pure math for splitting one file into several contiguous byte ranges
+/// so DownloadController (AppStore.swift) can fetch them concurrently
+/// over separate HTTP Range requests instead of one connection end to
+/// end -- Hugging Face's CDN serves these from S3/CloudFront, which
+/// (unlike the origin git server) comfortably serves several
+/// simultaneous ranged reads of the same object at full speed each, so
+/// splitting turns one connection's throughput ceiling into several.
+/// Kept separate from DownloadController so the range math is
+/// unit-testable without spinning up URLSession. Ranges are inclusive
+/// on both ends, matching HTTP's own "Range: bytes=start-end" header.
+enum ParallelDownloadPlanner {
+    static let chunkCount = 4
+    /// Below this, connection setup overhead for extra parallel streams
+    /// isn't worth it -- a preset's ~4 GB quant clears this easily, but a
+    /// tiny file (or a probe that only turned up a small resource) stays
+    /// on the plain single-stream path instead.
+    static let minimumBytesToSplit: Int64 = 32 * 1024 * 1024
+
+    static func shouldSplit(totalBytes: Int64) -> Bool {
+        totalBytes >= minimumBytesToSplit
+    }
+
+    /// `chunkCount` contiguous ranges spanning `0...(totalBytes - 1)`,
+    /// each as close to equal size as integer division allows (the last
+    /// range absorbs the remainder). Never returns more ranges than
+    /// there are bytes, so a small `totalBytes` degrades to fewer,
+    /// still-valid single-byte-or-larger ranges instead of an empty one.
+    static func chunkRanges(totalBytes: Int64, chunkCount: Int = chunkCount) -> [ClosedRange<Int64>] {
+        guard totalBytes > 0, chunkCount > 0 else { return [] }
+        let count = totalBytes < Int64(chunkCount) ? Int(totalBytes) : chunkCount
+        let size = totalBytes / Int64(count)
+        var ranges: [ClosedRange<Int64>] = []
+        var start: Int64 = 0
+        for index in 0..<count {
+            let end = index == count - 1 ? totalBytes - 1 : start + size - 1
+            ranges.append(start...max(start, end))
+            start = end + 1
+        }
+        return ranges
     }
 }
 
@@ -620,6 +735,70 @@ struct BrewDependency: Identifiable, Equatable {
         .init(id: "mlx-lm", title: "MLX LM", detail: "Native Apple Silicon MLX inference", executables: ["mlx_lm.server"]),
         .init(id: "uv", title: "uv", detail: "Installer and environment manager required by vLLM-MLX", executables: ["uv"])
     ]
+
+    // Not one of InferenceBar's own runtime dependencies -- an optional
+    // companion tool (see GlobalServerSettingsView's dedicated "OpenCode"
+    // card, and AppStore.syncCodingProfilesToOpenCode), so it's kept out
+    // of `required` and installed/detected on its own.
+    static let opencode = Self(id: "opencode", title: "OpenCode", detail: "AI coding agent for the terminal", executables: ["opencode"])
+}
+
+/// Merges InferenceBar's coding-tagged profiles into a local OpenCode
+/// config (~/.config/opencode/opencode.json) as a custom OpenAI-compatible
+/// provider, so they show up as selectable models in OpenCode without
+/// hand-editing that file. Pure JSON-merge logic, kept separate from the
+/// actual file read/write (AppStore.syncCodingProfilesToOpenCode) so it's
+/// unit-testable without touching disk -- and so it never clobbers
+/// anything else already in that file (other providers, $schema, model
+/// aliases the user added by hand, ...): only the "provider.inferencebar"
+/// key is ever replaced.
+enum OpenCodeConfigSync {
+    static let providerID = "inferencebar"
+
+    struct ProfileEntry: Equatable {
+        let alias: String
+        let name: String
+        let contextSize: Int
+        let maximumOutputTokens: Int
+    }
+
+    /// Builds the merged config, given whatever top-level JSON object
+    /// already existed in opencode.json (an empty dictionary if the file
+    /// didn't exist yet or failed to parse) and the profiles to expose.
+    /// baseURL should already include the "/v1" suffix OpenCode's
+    /// openai-compatible provider expects.
+    /// defaultModelAlias, when set, becomes opencode.json's top-level
+    /// "model" field (as "inferencebar/<alias>") -- OpenCode's own default
+    /// across its interfaces unless someone picks a different one in its
+    /// /models picker. When nil, any "model" value this sync previously
+    /// wrote is cleared back out (recognized by its "inferencebar/"
+    /// prefix); a "model" pointing at some other provider is left alone,
+    /// since that's a choice this sync has no business overriding.
+    static func mergedConfig(existing: [String: Any], baseURL: String, apiKey: String, profiles: [ProfileEntry], defaultModelAlias: String? = nil) -> [String: Any] {
+        var config = existing
+        if config["$schema"] == nil { config["$schema"] = "https://opencode.ai/config.json" }
+        var providers = config["provider"] as? [String: Any] ?? [:]
+        var models: [String: Any] = [:]
+        for profile in profiles {
+            models[profile.alias] = [
+                "name": profile.name,
+                "limit": ["context": profile.contextSize, "output": profile.maximumOutputTokens]
+            ] as [String: Any]
+        }
+        providers[providerID] = [
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "InferenceBar (local)",
+            "options": ["baseURL": baseURL, "apiKey": apiKey],
+            "models": models
+        ] as [String: Any]
+        config["provider"] = providers
+        if let defaultModelAlias {
+            config["model"] = "\(providerID)/\(defaultModelAlias)"
+        } else if let existingModel = config["model"] as? String, existingModel.hasPrefix("\(providerID)/") {
+            config.removeValue(forKey: "model")
+        }
+        return config
+    }
 }
 
 enum HomebrewRuntimeManager {
@@ -716,6 +895,71 @@ enum MenuBarLifecyclePresentation {
         if isSending { return "\(activity.label.isEmpty ? "Working" : activity.label) · \(name)" }
         return name
     }
+
+    /// A dropdown line for requests hitting the running server that
+    /// aren't InferenceBar's own chat -- the CLI tool, opencode, anything
+    /// else on the OpenAI-compatible endpoint. nil when there's nothing
+    /// to show: not running, InferenceBar's own chat is the one sending
+    /// (that already has its own status line above), or the count is
+    /// zero. activeRequests is RuntimeTelemetryParser's count, which
+    /// already reflects every client hitting the server, not just this
+    /// app's own requests.
+    static func externalRequestLabel(lifecycle: ServerLifecycle, isSending: Bool, activeRequests: Int) -> String? {
+        guard lifecycle == .running, !isSending, activeRequests > 0 else { return nil }
+        return activeRequests == 1 ? "1 external request active" : "\(activeRequests) external requests active"
+    }
+}
+
+/// The Profiles list's per-row status dot and (indirectly, via
+/// ContentView's color mapping) the profile editor's disabled "Start
+/// server" state. Kept as plain data here -- no SwiftUI Color -- so the
+/// decision logic is testable the same way as CLIInstallPolicy/
+/// ChatColumnLayout above; ContentView.swift owns the actual colors.
+enum ProfileStatus: Equatable {
+    case failed
+    case running
+    case starting
+    case downloading
+    case modelMissing
+    case ready
+
+    static func status(
+        isFailed: Bool,
+        isRunningProfile: Bool,
+        serverLifecycleIsRunning: Bool,
+        isDownloadingThisProfile: Bool,
+        modelAvailable: Bool
+    ) -> ProfileStatus {
+        if isFailed { return .failed }
+        if isRunningProfile { return serverLifecycleIsRunning ? .running : .starting }
+        if isDownloadingThisProfile { return .downloading }
+        if !modelAvailable { return .modelMissing }
+        return .ready
+    }
+}
+
+/// The menu-bar dropdown's one-line summary for an in-progress model
+/// download -- kept pure (no AppStore, no NSMenuItem) so it's testable
+/// the same way as MenuBarLifecyclePresentation above. Read fresh every
+/// time the dropdown opens (menuNeedsUpdate in InferenceBarApp.swift),
+/// so unlike the per-profile progress view in ProfileEditor, it doesn't
+/// disappear when you navigate away from the profile that started the
+/// download -- and it needs no polling of its own, since it only ever
+/// reflects AppStore's existing download-progress properties at the
+/// instant the menu opens.
+enum DownloadMenuBarPresentation {
+    static func summary(modelName: String, isResolving: Bool, status: String, progress: Double, totalBytes: Int64, bytesPerSecond: Double) -> String {
+        let shortName = modelName.split(separator: "/").last.map(String.init) ?? modelName
+        if isResolving {
+            return shortName.isEmpty ? "Resolving download…" : "Resolving \(shortName)…"
+        }
+        guard totalBytes > 0 else {
+            return shortName.isEmpty ? status : "\(shortName): \(status)"
+        }
+        let percent = progress.formatted(.percent.precision(.fractionLength(1)))
+        let speed = ByteCountFormatter.string(fromByteCount: Int64(bytesPerSecond), countStyle: .file)
+        return shortName.isEmpty ? "\(percent) · \(speed)/s" : "\(shortName): \(percent) · \(speed)/s"
+    }
 }
 
 enum DefaultProfileStartupPolicy {
@@ -725,19 +969,30 @@ enum DefaultProfileStartupPolicy {
 }
 
 /// Where Settings' "Install command-line tool" button should place the
-/// bundled `inferencebar` CLI binary (see Sources/InferenceBarCLI) —
+/// bundled `inference` CLI binary (see Sources/InferenceBarCLI) —
 /// decided from what's actually on this Mac, not assumed.
 enum CLIInstallPolicy {
-    /// Homebrew's own bin directory, when it exists and this user can
-    /// write to it, is preferred: InferenceBar already requires Homebrew
-    /// for its GGUF/MLX runtimes, so it's virtually guaranteed to exist
-    /// and already be on PATH for anyone who's used `brew` before.
-    /// Otherwise falls back to a per-user directory that never needs
-    /// elevated privileges to create or write to — InferenceBar ships
-    /// unsandboxed, but "Install" silently needing sudo the first time
-    /// it's clicked would be a bad surprise.
+    /// macOS's own default PATH (see /etc/paths) always includes this
+    /// directory for every standard login shell, with no profile edits
+    /// needed — tried first (with a one-time admin-privileges prompt
+    /// if it isn't already writable) so "Install" doesn't routinely
+    /// leave someone needing to edit PATH by hand afterward.
+    static let systemDirectory = "/usr/local/bin"
+
+    /// Homebrew's own bin directory — tried next since InferenceBar
+    /// already requires Homebrew for its GGUF/MLX runtimes, so most
+    /// users already have it writable without elevation. It only ends
+    /// up on PATH, though, once Homebrew's own `shellenv` line has
+    /// actually run in that shell's profile — and never for a GUI app's
+    /// own process environment, which is why `isOnPATH` below needs the
+    /// user's real login-shell PATH, not this process's own.
+    static let homebrewDirectory = "/opt/homebrew/bin"
+
+    /// Falls back to a per-user directory that never needs elevated
+    /// privileges to create or write to, when neither of the above can
+    /// be used even with an elevation prompt (declined, sandboxed, etc).
     static func destinationDirectory(homebrewBinIsWritableDirectory: Bool, homeDirectory: String) -> String {
-        homebrewBinIsWritableDirectory ? "/opt/homebrew/bin" : "\(homeDirectory)/.local/bin"
+        homebrewBinIsWritableDirectory ? homebrewDirectory : "\(homeDirectory)/.local/bin"
     }
 
     /// Whether the chosen destination is already somewhere a shell will
@@ -745,6 +1000,13 @@ enum CLIInstallPolicy {
     /// itself (colon-separated), not assumed from which directory was
     /// picked, since a customized shell profile might already add
     /// ~/.local/bin, or might have removed /opt/homebrew/bin.
+    ///
+    /// Callers must pass the user's real *login shell* PATH here, not
+    /// `ProcessInfo.processInfo.environment["PATH"]` — launchd hands a
+    /// GUI app a bare-bones default PATH that omits Homebrew's bin and
+    /// often even /usr/local/bin, regardless of what the same user's
+    /// actual Terminal sees, which used to make this check report a
+    /// false "not on PATH" for nearly every install.
     static func isOnPATH(_ directory: String, pathEnvironmentVariable: String) -> Bool {
         pathEnvironmentVariable.split(separator: ":").map(String.init).contains(directory)
     }
@@ -861,15 +1123,115 @@ enum AppSection: Hashable {
     case profiles, models, logs, prompt, settings
 }
 
+/// Use-case tags for grouping ProfilePreset.all in the "Add preset" menu.
+/// Mirrors ModelCategory's five curated categories below (same
+/// titles/icons) so the vocabulary is consistent between "browse Hugging
+/// Face" and "add a hardware preset". A preset can carry more than one
+/// tag -- the real models these presets wrap already show up in more than
+/// one of ModelCategory's recommendedModelIDs lists, so forcing a single
+/// tag per preset would misrepresent that overlap.
+enum PresetUseCase: String, CaseIterable, Hashable {
+    case coding
+    case chat
+    case visionChat
+    case homeAutomation
+    case systems
+
+    var title: String {
+        switch self {
+        case .coding: return "Coding"
+        case .chat: return "Chat"
+        case .visionChat: return "Chat with Images"
+        case .homeAutomation: return "Home Automation"
+        case .systems: return "Systems Management"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .coding: return "chevron.left.forwardslash.chevron.right"
+        case .chat: return "bubble.left.and.bubble.right.fill"
+        case .visionChat: return "photo.on.rectangle.angled"
+        case .homeAutomation: return "house.and.flag.fill"
+        case .systems: return "server.rack"
+        }
+    }
+}
+
 struct ProfilePreset: Identifiable {
     let id: String
     let title: String
     let hardware: String
     let summary: String
     let profile: ServerProfile
+    /// The Hugging Face repo a GGUF preset's model (and mmproj, if any)
+    /// can be downloaded from -- set only where the repo's real
+    /// filename has been confirmed to match this preset's expected
+    /// local filename (case-insensitively; see expectedGGUFFilename),
+    /// so "Add all presets" can request that exact file successfully.
+    /// nil means this GGUF preset's source repo isn't confirmed yet:
+    /// it can still be added by hand, it just won't auto-download.
+    /// Always nil for MLX/vLLM-MLX presets, which resolve their own
+    /// source directly from `profile.modelPath` instead (see
+    /// `downloadSourceModelID`).
+    var ggufSourceModelID: String? = nil
+    /// Which PresetUseCase(s) this preset's model is well-suited for, so
+    /// the "Add preset" menu can group by task instead of one long list.
+    /// Assigned primarily from ModelCategory's five curated
+    /// recommendedModelIDs lists where this preset's
+    /// downloadSourceModelID matches an entry there, and by informed
+    /// judgment (title, summary, known model-family strengths) where it
+    /// doesn't appear in any of them. Defaults to empty rather than
+    /// requiring every preset to opt in, but every preset below sets it
+    /// explicitly.
+    var useCases: Set<PresetUseCase> = []
+    /// The mmproj projector GGUF filename this preset's auto-download
+    /// should also fetch from the same `ggufSourceModelID` repo, once
+    /// the main model file is confirmed present -- llama.cpp needs this
+    /// file sitting alongside the model (see MultimodalProjector) to
+    /// actually accept image input; without it a `.visionChat` preset's
+    /// model downloads and runs fine but every image attachment gets
+    /// refused. nil for every non-vision preset, and for a vision preset
+    /// whose exact projector filename isn't confirmed yet (still taggable
+    /// `.visionChat` and addable by hand, it just won't auto-fetch the
+    /// projector).
+    var mmprojFilename: String? = nil
+
+    /// Whether this preset needs no further action to support image
+    /// input: trivially true for a non-vision preset (nothing to check),
+    /// or a `.visionChat` preset that already has *some* mmproj
+    /// projector GGUF sitting in `modelRoot` -- every model in this
+    /// app's shared, flat model folder is checked against the same
+    /// directory listing (see MultimodalProjector.path(forModelPath:)),
+    /// so any projector already there satisfies this preset's own
+    /// --mmproj wiring too, not only the exact file downloaded
+    /// alongside it. Used to avoid re-fetching a projector that's
+    /// already on disk under a different quant or name.
+    func hasProjectorAvailable(modelRoot: URL) -> Bool {
+        guard mmprojFilename != nil else { return true }
+        guard let siblings = try? FileManager.default.contentsOfDirectory(atPath: modelRoot.path) else { return false }
+        return MultimodalProjector.hasProjectorSibling(among: siblings)
+    }
 
     static var mlxDefaults: [ProfilePreset] {
         all.filter { $0.profile.runtime == .mlxLM }
+    }
+
+    /// Where this preset's model can be auto-downloaded from, unifying
+    /// the GGUF (`ggufSourceModelID`) and MLX/vLLM-MLX case (whose
+    /// `profile.modelPath` already *is* a Hugging Face repo ID).
+    var downloadSourceModelID: String? {
+        profile.runtime.usesGGUF ? ggufSourceModelID : profile.modelPath
+    }
+
+    /// The exact filename this GGUF preset expects locally -- also the
+    /// filename requested from `ggufSourceModelID`'s repo when
+    /// auto-downloading. Its real casing on Hugging Face may differ
+    /// (isAvailable's directory scan matches case-insensitively either
+    /// way).
+    var expectedGGUFFilename: String? {
+        guard profile.runtime.usesGGUF else { return nil }
+        return URL(fileURLWithPath: NSString(string: profile.modelPath).expandingTildeInPath).lastPathComponent
     }
 
     func isAvailable(modelRoot: URL) -> Bool {
@@ -888,251 +1250,397 @@ struct ProfilePreset: Identifiable {
         return MLXSnapshotResolver.resolve(modelID: profile.modelPath, root: modelRoot) != nil
     }
 
+    /// The lowest unified-memory figure mentioned in `hardware` -- e.g.
+    /// "M2/M3/M4 Pro or Max · 36–48 GB" -> 36, "Mac Studio Ultra / Mac
+    /// Pro · 192 GB+" -> 192. A range or a "+" always means this preset
+    /// was sized for at least that much, so the low end is the floor to
+    /// compare against, not an average. nil when the string doesn't
+    /// mention a GB figure at all (true of no current preset, but a
+    /// preset that fails to parse is never filtered out sight unseen --
+    /// see isSupported below).
+    var minimumUnifiedMemoryGB: Int? {
+        guard let expression = try? NSRegularExpression(pattern: #"(\d+)(?:[-–]\d+)?\s*GB"#),
+              let match = expression.firstMatch(in: hardware, range: NSRange(hardware.startIndex..., in: hardware)),
+              let range = Range(match.range(at: 1), in: hardware) else { return nil }
+        return Int(hardware[range])
+    }
+
+    /// Whether this preset's stated hardware tier fits a Mac with
+    /// `physicalMemoryGB` of unified memory -- used to keep "Add all
+    /// presets" and the "Not yet downloaded" menu from recommending (or
+    /// silently downloading) a model sized for a bigger Mac than this
+    /// one. Always true when minimumUnifiedMemoryGB can't be parsed, so
+    /// a description this doesn't understand is shown rather than
+    /// hidden.
+    func isSupported(physicalMemoryGB: Int) -> Bool {
+        guard let minimumUnifiedMemoryGB else { return true }
+        return physicalMemoryGB >= minimumUnifiedMemoryGB
+    }
+
     static let all: [ProfilePreset] = [
         ProfilePreset(
             id: "gguf-qwen25-coder-7b-8",
             title: "Qwen 2.5 Coder 7B · Q4_K_M",
             hardware: "Mac mini / MacBook Air · 8 GB",
             summary: "Entry-level coding preset with a conservative 4K context and limited agent headroom",
-            profile: ServerProfile(name: "Qwen 2.5 Coder 7B · 8 GB Mac", modelPath: "~/ai-models/qwen2.5-coder-7b-instruct-q4_k_m.gguf", alias: "qwen2.5-coder-7b", contextSize: 4096, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 256, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Qwen 2.5 Coder 7B · 8 GB Mac", modelPath: "~/ai-models/qwen2.5-coder-7b-instruct-q4_k_m.gguf", alias: "qwen2.5-coder-7b", contextSize: 4096, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 256, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF",
+            useCases: [.coding]
         ),
         ProfilePreset(
             id: "mlx-qwen3-4b-home-8",
             title: "Qwen 3 4B · Home Automation",
             hardware: "Mac mini / MacBook Air · 8 GB",
             summary: "Lightweight direct tool calling; use ha-mcp deferred discovery with an 8K context",
-            profile: ServerProfile(backend: .mlxLM, name: "Home Assistant · Qwen 3 4B · 8 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-4B-4bit", alias: "qwen3-4b-ha", contextSize: 8192, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "Home Assistant · Qwen 3 4B · 8 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-4B-4bit", alias: "qwen3-4b-ha", contextSize: 8192, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.homeAutomation]
         ),
         ProfilePreset(
             id: "mlx-qwen35-9b-home-16",
             title: "Qwen 3.5 9B · Home Automation",
             hardware: "Mac mini M4 / iMac M4 / MacBook Air · 16 GB+",
             summary: "Low-latency tool calling with a 16K context; use ha-mcp deferred tool search",
-            profile: ServerProfile(backend: .mlxLM, name: "Home Assistant · Qwen 3.5 9B", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.5-9B-MLX-4bit", alias: "qwen3.5-9b-ha", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "Home Assistant · Qwen 3.5 9B", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.5-9B-MLX-4bit", alias: "qwen3.5-9b-ha", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.homeAutomation]
         ),
         ProfilePreset(
             id: "mlx-qwen3-vl-8b-home-16",
             title: "Qwen3 VL 8B · Home Automation + Vision",
             hardware: "Mac mini M4 / iMac M4 · 16 GB+",
             summary: "Tool calling plus camera-image understanding with a 16K context",
-            profile: ServerProfile(backend: .mlxLM, name: "Home Assistant · Qwen3 VL 8B", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-VL-8B-Instruct-4bit", alias: "qwen3-vl-8b-ha", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "Home Assistant · Qwen3 VL 8B", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-VL-8B-Instruct-4bit", alias: "qwen3-vl-8b-ha", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.homeAutomation, .visionChat]
         ),
         ProfilePreset(
             id: "mlx-devstral-small2-24b-24",
             title: "Devstral Small 2 24B · MLX 4-bit",
             hardware: "iMac M4 / Mac mini M4 Pro / MacBook Pro · 24 GB",
             summary: "Dense coding and agent model; about 14 GB with a conservative 16K context",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Devstral Small 2 · iMac/mini 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", alias: "devstral-small-2", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Devstral Small 2 · iMac/mini 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", alias: "devstral-small-2", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .systems]
         ),
         ProfilePreset(
             id: "mlx-qwen36-27b-24",
             title: "Qwen 3.6 27B · MLX 4-bit",
             hardware: "iMac M4 / Mac mini M4 Pro / MacBook Pro · 24 GB",
             summary: "Dense general and coding model; about 16 GB with a conservative 16K context",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 27B · iMac/mini 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-27B-4bit", alias: "qwen3.6-27b", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 27B · iMac/mini 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-27B-4bit", alias: "qwen3.6-27b", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat, .systems]
         ),
         ProfilePreset(
             id: "gguf-qwen36-27b-q4-32",
             title: "Qwen 3.6 27B · Q4_K_M",
             hardware: "MacBook Pro Max / Mac Studio · 32 GB+",
             summary: "Dense 27B GGUF preset; approximately 19 GB with a 16K context",
-            profile: ServerProfile(name: "Qwen 3.6 27B · 32 GB Mac", modelPath: "~/ai-models/Qwen3.6-27B-Q4_K_M.gguf", alias: "qwen3.6-27b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true)
+            profile: ServerProfile(name: "Qwen 3.6 27B · 32 GB Mac", modelPath: "~/ai-models/Qwen3.6-27B-Q4_K_M.gguf", alias: "qwen3.6-27b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "ggml-org/Qwen3.6-27B-GGUF",
+            useCases: [.coding, .chat]
         ),
         ProfilePreset(
             id: "gguf-glm47-flash-q4-32",
             title: "GLM-4.7 Flash · Q4_K_M",
             hardware: "MacBook Pro Max / Mac Studio · 32 GB+",
             summary: "Fast 31B MoE model; approximately 18 GB with a 16K context",
-            profile: ServerProfile(name: "GLM-4.7 Flash · 32 GB Mac", modelPath: "~/ai-models/GLM-4.7-Flash-Q4_K_M.gguf", alias: "glm-4.7-flash", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true)
+            profile: ServerProfile(name: "GLM-4.7 Flash · 32 GB Mac", modelPath: "~/ai-models/GLM-4.7-Flash-Q4_K_M.gguf", alias: "glm-4.7-flash", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "DhruvalLabs/GLM-4.7-Flash-GGUF",
+            useCases: [.coding, .chat, .systems]
         ),
         ProfilePreset(
             id: "mlx-gpt-oss-20b-q4-16",
             title: "GPT-OSS 20B · MXFP4 Q4",
             hardware: "Mac mini M4 / iMac M4 / MacBook Air · 16 GB+",
             summary: "Memory-conscious tool-calling preset with a conservative 16K context",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · GPT-OSS 20B · 16 GB", executable: "mlx_lm.server", modelPath: "mlx-community/gpt-oss-20b-MXFP4-Q4", alias: "gpt-oss-20b", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · GPT-OSS 20B · 16 GB", executable: "mlx_lm.server", modelPath: "mlx-community/gpt-oss-20b-MXFP4-Q4", alias: "gpt-oss-20b", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat, .systems, .homeAutomation]
         ),
         ProfilePreset(
             id: "mlx-gpt-oss-20b-q8-24",
             title: "GPT-OSS 20B · MXFP4 Q8",
             hardware: "iMac M4 / Mac mini M4 Pro / MacBook Pro · 24 GB",
             summary: "Tool-calling focused MLX preset; roughly 12–16 GB before context cache",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · GPT-OSS 20B · iMac/mini 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/gpt-oss-20b-MXFP4-Q8", alias: "gpt-oss-20b", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · GPT-OSS 20B · iMac/mini 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/gpt-oss-20b-MXFP4-Q8", alias: "gpt-oss-20b", contextSize: 16384, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat, .systems, .homeAutomation]
         ),
         ProfilePreset(
             id: "mlx-qwen36-m3max-48",
             title: "Qwen 3.6 35B A3B · MLX 4-bit",
             hardware: "MacBook Pro M3 Max · 48 GB",
             summary: "Native Apple MLX runtime; avoids the current GGUF MTP loader issue",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 35B · M3 Max 48 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-35B-A3B-4bit", alias: "default_model", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 35B · M3 Max 48 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-35B-A3B-4bit", alias: "default_model", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat, .homeAutomation]
         ),
         ProfilePreset(
             id: "vllm-mlx-qwen36-m3max-48",
             title: "Qwen 3.6 35B A3B · vLLM-MLX",
             hardware: "MacBook Pro M3 Max · 48 GB",
             summary: "MLX with continuous batching and an OpenAI-compatible server",
-            profile: ServerProfile(backend: .vllmMLX, name: "vLLM-MLX · Qwen 3.6 35B · 48 GB", executable: "vllm-mlx", modelPath: "mlx-community/Qwen3.6-35B-A3B-4bit", alias: "default", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 0, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .vllmMLX, name: "vLLM-MLX · Qwen 3.6 35B · 48 GB", executable: "vllm-mlx", modelPath: "mlx-community/Qwen3.6-35B-A3B-4bit", alias: "default", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 0, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat, .homeAutomation, .systems]
         ),
         ProfilePreset(
             id: "mlx-deepseek-r1-7b-16",
             title: "DeepSeek R1 Distill Qwen 7B · MLX 4-bit",
             hardware: "Mac mini M4 / iMac M4 / MacBook Air · 16 GB",
             summary: "Compact reasoning model; approximately 4.3 GB of MLX weights",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · DeepSeek R1 7B · 16 GB", executable: "mlx_lm.server", modelPath: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit", alias: "default_model", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · DeepSeek R1 7B · 16 GB", executable: "mlx_lm.server", modelPath: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit", alias: "default_model", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "mlx-gemma3-12b-24",
             title: "Gemma 3 12B Instruct · MLX 4-bit",
             hardware: "iMac M4 / Mac mini M4 Pro / MacBook Pro · 24 GB",
             summary: "Balanced everyday assistant with multimodal-capable model weights",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Gemma 3 12B · 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/gemma-3-12b-it-4bit", alias: "default_model", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Gemma 3 12B · 24 GB", executable: "mlx_lm.server", modelPath: "mlx-community/gemma-3-12b-it-4bit", alias: "default_model", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.chat]
         ),
         ProfilePreset(
             id: "mlx-qwen3-coder-30b-32",
             title: "Qwen3 Coder 30B A3B · MLX 4-bit",
             hardware: "Mac mini M4 Pro / Mac Studio / MacBook Pro · 32 GB+",
             summary: "Coding-focused MoE model; approximately 17.2 GB of MLX weights",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 Coder 30B · 32 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", alias: "default_model", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 Coder 30B · 32 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", alias: "default_model", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .systems, .homeAutomation]
         ),
         ProfilePreset(
             id: "mlx-qwen3-coder-30b-8bit-48",
             title: "Qwen3 Coder 30B A3B · MLX 8-bit",
             hardware: "MacBook Pro Max / Mac Studio · 48 GB+",
             summary: "Higher-fidelity coding preset with a conservative 32K context",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 Coder 30B 8-bit · 48 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", alias: "qwen3-coder-30b", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 Coder 30B 8-bit · 48 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", alias: "qwen3-coder-30b", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding]
         ),
         ProfilePreset(
             id: "mlx-qwen36-6bit-48",
             title: "Qwen 3.6 35B A3B · MLX 6-bit",
             hardware: "MacBook Pro Max / Mac Studio · 48 GB+",
             summary: "Quality-focused middle quantization with a 32K context",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 35B 6-bit · 48 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-35B-A3B-6bit", alias: "qwen3.6-35b", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 35B 6-bit · 48 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-35B-A3B-6bit", alias: "qwen3.6-35b", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat]
         ),
         ProfilePreset(
             id: "mlx-qwen36-8bit-64",
             title: "Qwen 3.6 35B A3B · MLX 8-bit",
             hardware: "Mac Studio Max / Ultra · 64 GB+",
             summary: "High-quality MLX quantization with room for a 64K context",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 35B 8-bit · 64 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-35B-A3B-8bit", alias: "qwen3.6-35b", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen 3.6 35B 8-bit · 64 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.6-35B-A3B-8bit", alias: "qwen3.6-35b", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat]
         ),
         ProfilePreset(
             id: "phi4-16-developer",
             title: "Phi-4 14B · Q4_K_M",
             hardware: "MacBook Air / Pro / mini · 16 GB",
             summary: "Strong reasoning per parameter; 16K native context",
-            profile: ServerProfile(name: "Recommended · Phi-4 14B · 16 GB", modelPath: "~/ai-models/Phi-4-Q4_K_M.gguf", alias: "phi-4", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Recommended · Phi-4 14B · 16 GB", modelPath: "~/ai-models/Phi-4-Q4_K_M.gguf", alias: "phi-4", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "bartowski/phi-4-GGUF",
+            useCases: [.coding, .chat]
         ),
         ProfilePreset(
             id: "deepseek-r1-7b-16",
             title: "DeepSeek R1 Distill Qwen 7B · Q5_K_M",
             hardware: "Apple Silicon · 16 GB",
             summary: "MIT-licensed reasoning preset with a 32K context",
-            profile: ServerProfile(name: "Recommended · DeepSeek R1 7B · 16 GB", modelPath: "~/ai-models/DeepSeek-R1-Distill-Qwen-7B-Q5_K_M.gguf", alias: "deepseek-r1-7b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "auto", reasoningBudget: 1024, reasoningFormat: "deepseek", reasoningPreserve: true)
+            profile: ServerProfile(name: "Recommended · DeepSeek R1 7B · 16 GB", modelPath: "~/ai-models/DeepSeek-R1-Distill-Qwen-7B-Q5_K_M.gguf", alias: "deepseek-r1-7b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "auto", reasoningBudget: 1024, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "gemma4-8b-opencode",
             title: "Gemma 4 8B · Q5_K_M · OpenCode",
             hardware: "Apple Silicon · 16–24 GB",
             summary: "Coding-agent preset with the recommended 32K context",
-            profile: ServerProfile(name: "Recommended · Gemma 4 8B · OpenCode", modelPath: "~/ai-models/Gemma-4-8B-Q5_K_M.gguf", alias: "gemma-4-8b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Recommended · Gemma 4 8B · OpenCode", modelPath: "~/ai-models/google_gemma-4-E4B-it-Q5_K_M.gguf", alias: "gemma-4-8b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            // Google's own size name is "E4B" (4.5B effective / 8B with
+            // embeddings) -- this preset's "8B" title is that same model.
+            ggufSourceModelID: "bartowski/google_gemma-4-E4B-it-GGUF",
+            useCases: [.coding]
         ),
         ProfilePreset(
             id: "gemma4-26b-opencode",
             title: "Gemma 4 26B MoE · Q4_K_M · OpenCode",
             hardware: "Apple Silicon · 32 GB+",
             summary: "MoE coding-agent sweet spot with a 32K context",
-            profile: ServerProfile(name: "Recommended · Gemma 4 26B · OpenCode", modelPath: "~/ai-models/Gemma-4-26B-Q4_K_M.gguf", alias: "gemma-4-26b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Recommended · Gemma 4 26B · OpenCode", modelPath: "~/ai-models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf", alias: "gemma-4-26b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            // 25.2B total / 3.8B active MoE -- no plain (non-"UD") Q4_K_M
+            // exists for this one; Unsloth's "UD" dynamic-quant Q4_K_M is
+            // the standard offering at this quant level.
+            ggufSourceModelID: "unsloth/gemma-4-26B-A4B-it-GGUF",
+            useCases: [.coding]
         ),
         ProfilePreset(
             id: "mistral-small31-32",
             title: "Mistral Small 3.1 24B · Q4_K_M",
             hardware: "M2/M3/M4 Max or Pro · 32 GB+",
             summary: "Apache-licensed function calling and coding preset",
-            profile: ServerProfile(name: "Recommended · Mistral Small 3.1 · 32 GB", modelPath: "~/ai-models/Mistral-Small-3.1-24B-Instruct-Q4_K_M.gguf", alias: "mistral-small-3.1", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Recommended · Mistral Small 3.1 · 32 GB", modelPath: "~/ai-models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf", alias: "mistral-small-3.1", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            // Confirmed vision-capable: bartowski's repo also ships
+            // mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-*.gguf
+            // projector files, and llama.cpp auto-wires --mmproj from a
+            // sibling in the model folder (see MultimodalProjector) --
+            // same mechanism the Qwen3-VL presets above rely on. The f16
+            // projector is picked over bf16 -- either would work, f16 is
+            // just the more universally-supported of the two.
+            ggufSourceModelID: "bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF",
+            useCases: [.coding, .chat, .visionChat],
+            mmprojFilename: "mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf"
         ),
         ProfilePreset(
             id: "llama3-16-air-imac-mini",
             title: "Llama 3.2 3B Instruct · Q6_K",
             hardware: "MacBook Air / iMac / Mac mini · 16 GB",
             summary: "Responsive general assistant with a generous 32K context",
-            profile: ServerProfile(name: "Llama 3.2 3B · 16 GB Mac", modelPath: "~/ai-models/Llama-3.2-3B-Instruct-Q6_K.gguf", alias: "llama-3.2-3b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Llama 3.2 3B · 16 GB Mac", modelPath: "~/ai-models/Llama-3.2-3B-Instruct-Q6_K.gguf", alias: "llama-3.2-3b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "bartowski/Llama-3.2-3B-Instruct-GGUF",
+            useCases: [.chat]
         ),
         ProfilePreset(
             id: "qwen14-24-imac-mini-pro",
             title: "Qwen3 14B · Q4_K_M",
             hardware: "iMac / Mac mini / MacBook Pro · 24 GB",
             summary: "Mid-size reasoning model with a conservative 16K context",
-            profile: ServerProfile(name: "Qwen3 14B · 24 GB Mac", modelPath: "~/ai-models/Qwen3-14B-Q4_K_M.gguf", alias: "qwen3-14b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "auto", reasoningBudget: 384, reasoningFormat: "deepseek", reasoningPreserve: true)
+            profile: ServerProfile(name: "Qwen3 14B · 24 GB Mac", modelPath: "~/ai-models/Qwen_Qwen3-14B-Q4_K_M.gguf", alias: "qwen3-14b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "auto", reasoningBudget: 384, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "bartowski/Qwen_Qwen3-14B-GGUF",
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "qwen35-m3max-48",
             title: "Qwen 3.6 35B A3B · Q5_K_M",
             hardware: "MacBook Pro M3 Max · 48 GB",
             summary: "Large 128K context, 4 GB cache, full SWA cache, reasoning enabled",
-            profile: ServerProfile(name: "Qwen 3.6 35B · M3 Max 48 GB", modelPath: "~/ai-models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf", alias: "qwen3.6-35b-a3b", contextSize: 131072, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true, swaFull: true)
+            profile: ServerProfile(name: "Qwen 3.6 35B · M3 Max 48 GB", modelPath: "~/ai-models/Qwen_Qwen3.6-35B-A3B-Q5_K_M.gguf", alias: "qwen3.6-35b-a3b", contextSize: 131072, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true, swaFull: true),
+            ggufSourceModelID: "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF",
+            useCases: [.coding, .chat, .homeAutomation]
+        ),
+        // Vision+text chat presets: llama.cpp auto-detects the mmproj
+        // sibling file (see MultimodalProjector) and wires up --mmproj,
+        // so as long as mmprojFilename below is set, "Add preset" fetches
+        // both files -- this comment used to say that had to be done by
+        // hand, back when the download queue only ever fetched one file
+        // per preset; see AppStore.processPresetDownloadQueue.
+        ProfilePreset(
+            id: "gguf-qwen3-vl-8b-q4-16",
+            title: "Qwen3-VL 8B · Q4_K_M",
+            hardware: "Mac mini / MacBook Air · 16 GB+",
+            summary: "Vision + text chat; about 6 GB with the projector, 32K context",
+            profile: ServerProfile(name: "Qwen3-VL 8B · 16 GB Mac", modelPath: "~/ai-models/Qwen3VL-8B-Instruct-Q4_K_M.gguf", alias: "qwen3-vl-8b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 512, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+            useCases: [.chat, .visionChat],
+            mmprojFilename: "mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+        ),
+        ProfilePreset(
+            id: "gguf-qwen3-vl-8b-q8-32",
+            title: "Qwen3-VL 8B · Q8_0",
+            hardware: "MacBook Pro Max / Mac Studio · 32 GB+",
+            summary: "Higher-fidelity vision + text chat; about 10 GB with the projector, 64K context",
+            profile: ServerProfile(name: "Qwen3-VL 8B Q8 · 32 GB Mac", modelPath: "~/ai-models/Qwen3VL-8B-Instruct-Q8_0.gguf", alias: "qwen3-vl-8b-q8", contextSize: 65536, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+            useCases: [.chat, .visionChat],
+            mmprojFilename: "mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+        ),
+        ProfilePreset(
+            id: "gguf-qwen3-vl-32b-q4-48",
+            title: "Qwen3-VL 32B · Q4_K_M",
+            hardware: "MacBook Pro M3 Max · 48 GB",
+            summary: "Flagship vision + text chat; about 21 GB with the projector, 64K context",
+            profile: ServerProfile(name: "Qwen3-VL 32B · M3 Max 48 GB", modelPath: "~/ai-models/Qwen3VL-32B-Instruct-Q4_K_M.gguf", alias: "qwen3-vl-32b", contextSize: 65536, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "Qwen/Qwen3-VL-32B-Instruct-GGUF",
+            useCases: [.chat, .visionChat],
+            mmprojFilename: "mmproj-Qwen3VL-32B-Instruct-F16.gguf"
         ),
         ProfilePreset(
             id: "qwen8-16",
             title: "Qwen3 8B · Q4_K_M",
             hardware: "M1/M2/M3/M4 · 16 GB",
             summary: "Conservative 8K context for entry-level unified memory",
-            profile: ServerProfile(name: "Qwen3 8B · 16 GB Mac", modelPath: "~/ai-models/Qwen3-8B-Q4_K_M.gguf", alias: "qwen3-8b", contextSize: 8192, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "auto", reasoningBudget: 256, reasoningFormat: "deepseek", reasoningPreserve: false)
+            profile: ServerProfile(name: "Qwen3 8B · 16 GB Mac", modelPath: "~/ai-models/Qwen_Qwen3-8B-Q4_K_M.gguf", alias: "qwen3-8b", contextSize: 8192, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "auto", reasoningBudget: 256, reasoningFormat: "deepseek", reasoningPreserve: false),
+            ggufSourceModelID: "bartowski/Qwen_Qwen3-8B-GGUF",
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "gemma12-24",
             title: "Gemma 3 12B · Q4_K_M",
             hardware: "Mac mini / MacBook Pro · 24 GB",
             summary: "Balanced 16K context for text and vision-capable models",
-            profile: ServerProfile(name: "Gemma 3 12B · 24 GB Mac", modelPath: "~/ai-models/gemma-3-12b-it-Q4_K_M.gguf", alias: "gemma-3-12b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Gemma 3 12B · 24 GB Mac", modelPath: "~/ai-models/google_gemma-3-12b-it-Q4_K_M.gguf", alias: "gemma-3-12b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            // Confirmed vision-capable: bartowski's repo also ships
+            // mmproj-google_gemma-3-12b-it-*.gguf projector files, and
+            // llama.cpp auto-wires --mmproj from a sibling in the model
+            // folder (see MultimodalProjector) -- same mechanism the
+            // Qwen3-VL presets above rely on. f16 over bf16/f32 for the
+            // same reason as Mistral Small 3.1 above.
+            ggufSourceModelID: "bartowski/google_gemma-3-12b-it-GGUF",
+            useCases: [.chat, .visionChat],
+            mmprojFilename: "mmproj-google_gemma-3-12b-it-f16.gguf"
         ),
         ProfilePreset(
             id: "qwen30-36",
             title: "Qwen3 30B A3B · Q4_K_M",
             hardware: "M2/M3/M4 Pro or Max · 36–48 GB",
             summary: "32K context and reasoning with comfortable memory headroom",
-            profile: ServerProfile(name: "Qwen3 30B A3B · 36–48 GB Mac", modelPath: "~/ai-models/Qwen3-30B-A3B-Q4_K_M.gguf", alias: "qwen3-30b-a3b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true)
+            profile: ServerProfile(name: "Qwen3 30B A3B · 36–48 GB Mac", modelPath: "~/ai-models/Qwen_Qwen3-30B-A3B-Q4_K_M.gguf", alias: "qwen3-30b-a3b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "bartowski/Qwen_Qwen3-30B-A3B-GGUF",
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "llama70-64",
             title: "Llama 3.3 70B Instruct · Q4_K_M",
             hardware: "Mac Studio / MacBook Pro Max · 64 GB+",
             summary: "Large model preset with 16K context and 6 GB cache",
-            profile: ServerProfile(name: "Llama 3.3 70B · 64 GB+ Mac", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q4_K_M.gguf", alias: "llama-3.3-70b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 6144, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(name: "Llama 3.3 70B · 64 GB+ Mac", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q4_K_M.gguf", alias: "llama-3.3-70b", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 6144, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "bartowski/Llama-3.3-70B-Instruct-GGUF",
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "qwen32-64-studio",
             title: "Qwen3 32B · Q6_K",
             hardware: "Mac Studio Max · 64–96 GB",
             summary: "Higher-quality quantization, 32K context, and ample cache",
-            profile: ServerProfile(name: "Qwen3 32B · Mac Studio 64–96 GB", modelPath: "~/ai-models/Qwen3-32B-Q6_K.gguf", alias: "qwen3-32b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 6144, reasoning: "auto", reasoningBudget: 768, reasoningFormat: "deepseek", reasoningPreserve: true)
+            profile: ServerProfile(name: "Qwen3 32B · Mac Studio 64–96 GB", modelPath: "~/ai-models/Qwen_Qwen3-32B-Q6_K.gguf", alias: "qwen3-32b", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 6144, reasoning: "auto", reasoningBudget: 768, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "bartowski/Qwen_Qwen3-32B-GGUF",
+            useCases: [.chat, .coding]
         ),
+        // Q6_K and Q8_0 at 70B both exceed Hugging Face's single-file
+        // comfort limit, so every quantizer (bartowski, unsloth) ships
+        // them pre-split into two parts under a same-named subdirectory
+        // (e.g. "Llama-3.3-70B-Instruct-Q6_K/…-00001-of-00002.gguf").
+        // download(file:from:to:ownerProfileID:) only ever fetches one
+        // flat filename, so it can't reassemble a split model --
+        // ggufSourceModelID deliberately stays unset for these two and
+        // "Add all presets" leaves them as manual downloads. modelPath
+        // points at the first part with llama.cpp's own split-file
+        // naming so that once both parts are placed in the model
+        // directory, llama-server (given the first part's path) finds
+        // and loads the rest on its own.
         ProfilePreset(
             id: "llama70-128-ultra-pro",
             title: "Llama 3.3 70B Instruct · Q6_K",
             hardware: "Mac Studio Ultra / Mac Pro · 128 GB+",
-            summary: "Quality-focused 70B preset with 32K context",
-            profile: ServerProfile(name: "Llama 3.3 70B · Ultra/Pro 128 GB+", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q6_K.gguf", alias: "llama-3.3-70b-q6", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 8192, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            summary: "Quality-focused 70B preset with 32K context; ships as two split GGUF files -- download both from the same repo into the model folder",
+            profile: ServerProfile(name: "Llama 3.3 70B · Ultra/Pro 128 GB+", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q6_K-00001-of-00002.gguf", alias: "llama-3.3-70b-q6", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 8192, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "llama70-192-ultra-pro",
             title: "Llama 3.3 70B Instruct · Q8_0",
             hardware: "Mac Studio Ultra / Mac Pro · 192 GB+",
-            summary: "High-fidelity 70B preset with 65K context and large cache",
-            profile: ServerProfile(name: "Llama 3.3 70B · Ultra/Pro 192 GB+", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q8_0.gguf", alias: "llama-3.3-70b-q8", contextSize: 65536, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 12288, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            summary: "High-fidelity 70B preset with 65K context and large cache; ships as two split GGUF files -- download both from the same repo into the model folder",
+            profile: ServerProfile(name: "Llama 3.3 70B · Ultra/Pro 192 GB+", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q8_0-00001-of-00002.gguf", alias: "llama-3.3-70b-q8", contextSize: 65536, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 12288, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "llama70-q8-128-studio-ultra",
             title: "Llama 3.3 70B Instruct · Q8_0",
             hardware: "Mac Studio Ultra · 128 GB",
-            summary: "Dense quality-focused model with a conservative 16K context and resident HA headroom",
-            profile: ServerProfile(name: "Llama 3.3 70B Q8 · Studio Ultra 128 GB", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q8_0.gguf", alias: "llama-3.3-70b-q8", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 8192, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            summary: "Dense quality-focused model with a conservative 16K context and resident HA headroom; ships as two split GGUF files -- download both from the same repo into the model folder",
+            profile: ServerProfile(name: "Llama 3.3 70B Q8 · Studio Ultra 128 GB", modelPath: "~/ai-models/Llama-3.3-70B-Instruct-Q8_0-00001-of-00002.gguf", alias: "llama-3.3-70b-q8", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 8192, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.chat, .coding]
         ),
         ProfilePreset(
             id: "mlx-qwen3-235b-a22b-192",
             title: "Qwen3 235B A22B · MLX 4-bit",
             hardware: "Mac Studio Ultra · 192 GB+",
             summary: "Flagship MoE preset; approximately 132 GB of weights with the native 40K context",
-            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 235B A22B · Studio Ultra", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-235B-A22B-4bit", alias: "qwen3-235b-a22b", contextSize: 40960, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false)
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 235B A22B · Studio Ultra", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-235B-A22B-4bit", alias: "qwen3-235b-a22b", contextSize: 40960, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat]
         )
     ]
 }
@@ -1160,6 +1668,27 @@ struct ModelCategory: Identifiable, Hashable {
     static let recommendedChat = Self(id: "recommended-chat", title: "Recommended for Prompted Chat", icon: "bubble.left.and.bubble.right.fill", recommendedFamilies: ["Qwen Instruct", "Llama Instruct", "Mistral Instruct", "Gemma it", "Phi"], recommendedModelIDs: ["ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8"])
     static let recommendedSystems = Self(id: "recommended-systems", title: "Recommended for Systems Management", icon: "server.rack", recommendedFamilies: ["Qwen Coder", "Granite Code", "DeepSeek Coder", "Command R"], recommendedModelIDs: ["DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8"])
     static let recommendedHomeAutomation = Self(id: "recommended-home-automation", title: "Recommended for Home Automation", icon: "house.and.flag.fill", recommendedFamilies: [], recommendedModelIDs: ["mlx-community/Qwen3-4B-4bit", "mlx-community/Qwen3.5-9B-MLX-4bit", "mlx-community/Qwen3-VL-8B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF"])
+    /// Chat models that can also read an attached image -- i.e. ones
+    /// llama.cpp can serve with a matching mmproj projector (see
+    /// MultimodalProjector), or an MLX build mlx-vlm actually loads.
+    /// Deliberately narrower than ModelCategory.multimodal's raw
+    /// "image-text-to-text" pipeline tag, which turns up plenty of
+    /// vision models that aren't really a fit for open-ended chat, and
+    /// some GGUF/MLX conversions of newer VL releases whose runtime
+    /// support isn't there yet (e.g. mlx-vlm's Qwen3-VL-30B-A3B convert
+    /// currently fails to load with "Model type qwen3_vl_moe not
+    /// supported"). Everything listed here is a plain dense Qwen3-VL
+    /// Instruct build with a working GGUF+mmproj release from Qwen
+    /// themselves, or the same family's existing MLX 4-bit convert.
+    /// pipelineTag constrains this category's *live* Hugging Face search
+    /// (both the family-keyword search and, for every other category,
+    /// the plain browse) to models tagged "image-text-to-text" -- i.e.
+    /// actually capable of both, not just a family-name text match that
+    /// happens to also turn up text-only siblings from the same family.
+    /// The hand-picked recommendedModelIDs above are exempt from this
+    /// (they're already confirmed vision+text), so this only tightens
+    /// what else surfaces alongside them.
+    static let recommendedVisionChat = Self(id: "recommended-vision-chat", title: "Chat with Images", icon: "photo.on.rectangle.angled", pipelineTag: "image-text-to-text", recommendedFamilies: ["Qwen VL Instruct"], recommendedModelIDs: ["Qwen/Qwen3-VL-8B-Instruct-GGUF", "Qwen/Qwen3-VL-32B-Instruct-GGUF", "mlx-community/Qwen3-VL-8B-Instruct-4bit"])
     static let recommendedAppleSilicon = Self(id: "recommended-apple-silicon", title: "Recommended for Apple Silicon", icon: "apple.logo", recommendedFamilies: ["Qwen Instruct", "Llama Instruct", "Mistral Instruct", "Gemma it", "Phi"], recommendedModelIDs: ["Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", "ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Qwen3-4B-4bit", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-6bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-235B-A22B-4bit"])
     static let all = Self(id: "all", title: "All", icon: "square.grid.2x2")
     static let trending = Self(id: "trending", title: "Trending", icon: "flame", sort: "trendingScore")
@@ -1376,6 +1905,20 @@ enum ChatImageAttachmentPolicy {
         let scaledHeight = max(1, Int((Double(height) * scale).rounded()))
         return (scaledWidth, scaledHeight)
     }
+
+    /// Whether a profile with this runtime and mmproj-detection result
+    /// should have image attachments refused outright, rather than sent
+    /// and left to llama-server itself to reject with a raw "image input
+    /// is not supported" 500 (which is what used to happen -- the
+    /// composer only warned, it never actually stopped the attach or the
+    /// send). True only for a llama.cpp profile with no projector
+    /// detected next to its model. MLX and vLLM-MLX are never blocked
+    /// here: InferenceBar doesn't wire up --mmproj for those backends at
+    /// all, so "no projector detected" doesn't mean anything for them --
+    /// they may still support vision input on their own.
+    static func blocksImageAttachment(runtime: InferenceBackend, hasProjector: Bool) -> Bool {
+        runtime == .llamaCPP && !hasProjector
+    }
 }
 
 /// Attached images are real files under AppStore's chat-images directory
@@ -1554,6 +2097,32 @@ enum ChatComposerSizing {
             total + max(1, Int(ceil(Double(max(line.count, 1)) / Double(approximateCharactersPerLine))))
         }
         return min(max(Double(visualLines) * 20 + 16, minimum), maximum)
+    }
+}
+
+/// The Chat window's transcript/composer reading-column width, given the
+/// scroll viewport's actual width. Scales with the window instead of
+/// staying pinned to one fixed width forever -- which left large,
+/// increasingly silly empty margins on anything wider than a modest
+/// laptop screen. Still capped well short of the full viewport on a very
+/// wide or external display, since an uncapped width would just stretch
+/// prose lines to the point of being harder to read, not easier.
+enum ChatColumnLayout {
+    /// The previous fixed width, kept as the floor: a maxWidth is only
+    /// ever a ceiling, so a window narrower than this still shrinks below
+    /// it exactly as before -- this only ever widens the column, never
+    /// narrows it relative to the old behavior.
+    static let minimumWidth: Double = 760
+    /// A generous cap on very wide/external displays: wide enough to use
+    /// the extra space, not so wide that a line of prose runs edge to
+    /// edge and becomes harder to read.
+    static let maximumWidth: Double = 1200
+    /// Left on each side once the column stops growing with the window,
+    /// so it doesn't reach all the way to the very edge even below the cap.
+    static let sideMargin: Double = 80
+
+    static func maxWidth(forViewportWidth viewportWidth: Double) -> Double {
+        min(max(viewportWidth - sideMargin, minimumWidth), maximumWidth)
     }
 }
 

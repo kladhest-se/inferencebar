@@ -212,6 +212,18 @@ final class AppStore {
     var autoStartDefaultProfile = UserDefaults.standard.bool(forKey: "autoStartDefaultProfile") {
         didSet { UserDefaults.standard.set(autoStartDefaultProfile, forKey: "autoStartDefaultProfile") }
     }
+    // Which "Coding"-tagged profile OpenCode should use unless the person
+    // picks a different one themselves in its own /models picker -- see
+    // syncCodingProfilesToOpenCode(), which writes this as opencode.json's
+    // top-level "model" field. Distinct from defaultProfileID above,
+    // which is InferenceBar's own auto-start-on-launch profile and has
+    // nothing to do with OpenCode.
+    var defaultCodingProfileID = UserDefaults.standard.string(forKey: "defaultCodingProfileID").flatMap(UUID.init(uuidString:)) {
+        didSet {
+            if let defaultCodingProfileID { UserDefaults.standard.set(defaultCodingProfileID.uuidString, forKey: "defaultCodingProfileID") }
+            else { UserDefaults.standard.removeObject(forKey: "defaultCodingProfileID") }
+        }
+    }
     // Off by default: registering a global key monitor is exactly the kind
     // of thing that should be opt-in, not something a fresh install starts
     // doing silently. InferenceBarDelegate observes .inferenceHotkeySettingChanged
@@ -292,6 +304,11 @@ final class AppStore {
     private var outputTask: Task<Void, Never>?
     private var readinessTask: Task<Void, Never>?
     private var healthTask: Task<Void, Never>?
+    // Piggybacks on healthTask's existing per-second poll rather than
+    // adding a second timer -- see the loop below. Not read by any UI, so
+    // it's excluded from Observation tracking like the other bookkeeping
+    // vars near chatGenerationTask above.
+    @ObservationIgnored private var lastObservedActiveRequests = 0
     private var stopRequested = false
     var autoRestartOnCrash = UserDefaults.standard.bool(forKey: "autoRestartOnCrash") {
         didSet { UserDefaults.standard.set(autoRestartOnCrash, forKey: "autoRestartOnCrash") }
@@ -360,6 +377,7 @@ final class AppStore {
         if let data = try? Data(contentsOf: favoritesURL), let saved = try? JSONDecoder().decode(Set<UUID>.self, from: data) { favoriteProfileIDs = saved }
         loadProfiles()
         if let defaultProfileID, !profiles.contains(where: { $0.id == defaultProfileID }) { self.defaultProfileID = nil }
+        if let defaultCodingProfileID, !profiles.contains(where: { $0.id == defaultCodingProfileID }) { self.defaultCodingProfileID = nil }
         modelManifestEntries = ModelMetadataManifest.load(from: configuredModelRoot)
         reconcileMLXProfilePaths()
         selectedProfileID = profiles.first?.id
@@ -377,6 +395,23 @@ final class AppStore {
     var canStartProfile: Bool { !MenuBarLifecyclePresentation.locksProfileSelection(serverLifecycle) && process == nil }
     var favoriteProfiles: [ServerProfile] { profiles.filter { favoriteProfileIDs.contains($0.id) } }
     var availablePresets: [ProfilePreset] { ProfilePreset.all.filter { $0.isAvailable(modelRoot: configuredModelRoot) } }
+    // Hardware-gated on purpose only for the not-yet-downloaded side: a
+    // preset whose model is already on disk stays offered regardless --
+    // it's not this filter's job to second-guess a model the user
+    // already has, only to stop recommending (or auto-downloading) one
+    // sized for a bigger Mac than this.
+    var missingPresets: [ProfilePreset] {
+        ProfilePreset.all.filter { !$0.isAvailable(modelRoot: configuredModelRoot) && $0.isSupported(physicalMemoryGB: currentUnifiedMemoryGB) }
+    }
+    // Counts presets hidden from missingPresets by the hardware check
+    // above, so the menu can say *why* the list looks shorter than
+    // ProfilePreset.all instead of just silently trimming it.
+    var hardwareFilteredPresetCount: Int {
+        ProfilePreset.all.filter { !$0.isAvailable(modelRoot: configuredModelRoot) && !$0.isSupported(physicalMemoryGB: currentUnifiedMemoryGB) }.count
+    }
+    private var currentUnifiedMemoryGB: Int {
+        Int((Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824).rounded())
+    }
     func downloadedModelOptions(for runtime: InferenceBackend) -> [DownloadedModelOption] {
         DownloadedModelCatalog.scan(root: configuredModelRoot).filter { $0.supports(runtime) }
     }
@@ -412,30 +447,110 @@ final class AppStore {
         case failed(String)
     }
 
-    // Copies the `inferencebar` CLI binary this app bundle ships
-    // alongside itself (Contents/Resources/inferencebar) out to wherever
-    // CLIInstallPolicy picks, so "inferencebar ask ..." works from an
+    // Copies the `inference` CLI binary this app bundle ships alongside
+    // itself (Contents/Resources/inference) out to wherever
+    // CLIInstallPolicy picks, so "inference ask ..." works from an
     // ordinary Terminal without the user hunting for it inside the .app
     // bundle themselves.
+    //
+    // Tries /usr/local/bin first (macOS's own default PATH entry, so a
+    // fresh install rarely needs any PATH editing afterward), asking for
+    // one-time admin privileges to place it there when it isn't already
+    // writable -- normal on Apple Silicon, where Homebrew lives under
+    // /opt/homebrew and never touches /usr/local. Falls back to
+    // Homebrew's own bin (no prompt) and finally a per-user directory
+    // (also no prompt) if elevation isn't possible or is declined.
     func installCLITool() -> CLIInstallOutcome {
-        guard let bundled = Bundle.main.url(forResource: "inferencebar", withExtension: nil) else { return .bundledBinaryMissing }
+        guard let bundled = Bundle.main.url(forResource: "inference", withExtension: nil) else { return .bundledBinaryMissing }
         let fm = FileManager.default
-        let homebrewBin = "/opt/homebrew/bin"
-        let destinationDir = CLIInstallPolicy.destinationDirectory(
-            homebrewBinIsWritableDirectory: fm.isWritableFile(atPath: homebrewBin),
-            homeDirectory: fm.homeDirectoryForCurrentUser.path
-        )
-        let destination = URL(fileURLWithPath: destinationDir, isDirectory: true).appendingPathComponent("inferencebar")
-        do {
+        let systemBin = CLIInstallPolicy.systemDirectory
+        let homebrewBin = CLIInstallPolicy.homebrewDirectory
+        let realPATH = loginShellPATH()
+
+        func copy(to destinationDir: String) throws -> String {
+            let destination = URL(fileURLWithPath: destinationDir, isDirectory: true).appendingPathComponent("inference")
             try fm.createDirectory(atPath: destinationDir, withIntermediateDirectories: true)
             if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
             try fm.copyItem(at: bundled, to: destination)
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
+            return destination.path
+        }
+
+        if fm.isWritableFile(atPath: systemBin), let path = try? copy(to: systemBin) {
+            return .installed(path: path, onPATH: CLIInstallPolicy.isOnPATH(systemBin, pathEnvironmentVariable: realPATH))
+        }
+        if installCLIToolWithAdministratorPrivileges(from: bundled, into: systemBin) {
+            let destination = URL(fileURLWithPath: systemBin, isDirectory: true).appendingPathComponent("inference").path
+            return .installed(path: destination, onPATH: CLIInstallPolicy.isOnPATH(systemBin, pathEnvironmentVariable: realPATH))
+        }
+        // Elevation wasn't possible or was declined -- fall back exactly
+        // as before, without ever forcing a second prompt.
+        let destinationDir = CLIInstallPolicy.destinationDirectory(
+            homebrewBinIsWritableDirectory: fm.isWritableFile(atPath: homebrewBin),
+            homeDirectory: fm.homeDirectoryForCurrentUser.path
+        )
+        do {
+            let path = try copy(to: destinationDir)
+            return .installed(path: path, onPATH: CLIInstallPolicy.isOnPATH(destinationDir, pathEnvironmentVariable: realPATH))
         } catch {
             return .failed(error.localizedDescription)
         }
-        let onPATH = CLIInstallPolicy.isOnPATH(destinationDir, pathEnvironmentVariable: ProcessInfo.processInfo.environment["PATH"] ?? "")
-        return .installed(path: destination.path, onPATH: onPATH)
+    }
+
+    // The PATH the user's actual login shell resolves -- not this GUI
+    // process's own environment, which launchd populates with a bare
+    // default (roughly /usr/bin:/bin:/usr/sbin:/sbin) that omits
+    // Homebrew's bin and often even /usr/local/bin, regardless of what
+    // a real Terminal session for the same user sees. Spawns the user's
+    // $SHELL (falling back to zsh) as an interactive login shell so its
+    // profile scripts (.zprofile, .zshrc, etc.) actually run, same as
+    // opening Terminal would. Best-effort: falls back to this process's
+    // own PATH if the shell can't be started, errors, or hangs.
+    private func loginShellPATH() -> String {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-ilc", "printf %s \"$PATH\""]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        let fallback = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        do {
+            try process.run()
+        } catch {
+            return fallback
+        }
+        let deadline = Date().addingTimeInterval(3)
+        while process.isRunning && Date() < deadline { usleep(20_000) }
+        if process.isRunning { process.terminate() }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.isEmpty ? fallback : output
+    }
+
+    // Copies the bundled CLI binary into a system directory (normally
+    // /usr/local/bin) with a single admin-privileges prompt, for the
+    // common stock-macOS case where it isn't already writable by this
+    // user. Uses the same one-line "do shell script ... with
+    // administrator privileges" idiom most Mac dev tools use for this
+    // (VS Code's "code", Docker Desktop, etc.) rather than installing a
+    // persistent privileged helper. Also hands ownership of the
+    // directory itself (not its existing contents) to the current user,
+    // so a later reinstall or update doesn't need to prompt again.
+    // Returns false, without an error alert, if the user cancels the
+    // prompt -- the caller falls back quietly from there.
+    private func installCLIToolWithAdministratorPrivileges(from bundled: URL, into directory: String) -> Bool {
+        let destination = "\(directory)/inference"
+        let user = NSUserName()
+        let innerCommand = "mkdir -p \"\(directory)\" && chown \"\(user)\":staff \"\(directory)\" && cp \"\(bundled.path)\" \"\(destination)\" && chmod 755 \"\(destination)\""
+        let escapedCommand = innerCommand
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "do shell script \"\(escapedCommand)\" with administrator privileges"
+        guard let appleScript = NSAppleScript(source: script) else { return false }
+        var errorInfo: NSDictionary?
+        appleScript.executeAndReturnError(&errorInfo)
+        return errorInfo == nil
     }
 
     func downloadJob(modelID: String, file: String? = nil) -> DownloadJob? {
@@ -453,12 +568,19 @@ final class AppStore {
         let manifestNames = Set(modelManifestEntries.filter {
             $0.sourceModelID == model.id && FileManager.default.fileExists(atPath: $0.localPath)
         }.map { $0.filename.lowercased() })
+        let active = downloadJobs.values.filter { $0.modelID == model.id }
+        // A GGUF download pre-allocates its destination file before it
+        // finishes (see the ggufFileExists comment in ContentView.swift),
+        // so a file with an active job must never also count as
+        // "downloaded" -- otherwise the same version briefly shows up in
+        // both counts at once.
+        let activeFiles = Set(active.map(\.file))
         let downloaded = knownFiles.filter { file in
+            guard !activeFiles.contains(file) else { return false }
             let name = URL(fileURLWithPath: file).lastPathComponent
             if manifestNames.contains(name.lowercased()) { return true }
             return FileManager.default.fileExists(atPath: configuredModelRoot.appendingPathComponent(name).path)
         }.count
-        let active = downloadJobs.values.filter { $0.modelID == model.id }
         return (knownFiles.count, downloaded, active.count)
     }
 
@@ -615,6 +737,173 @@ final class AppStore {
         selectedProfileID = profile.id
     }
 
+    /// Adds a profile for `preset` and, if its model isn't on disk yet,
+    /// immediately starts downloading it -- see `addAllPresets` below
+    /// for which presets that covers. Also queues a projector-only
+    /// download when the main model is already present but the preset's
+    /// `mmprojFilename` isn't satisfied yet (see `hasProjectorAvailable`)
+    /// -- otherwise a vision preset added back when this app only ever
+    /// downloaded one file per preset stays permanently missing its
+    /// mmproj file even after upgrading to a build that knows to fetch it.
+    func addPresetStartingDownloadIfNeeded(_ preset: ProfilePreset) {
+        addPreset(preset)
+        if preset.useCases.contains(.coding) { syncCodingProfilesToOpenCode() }
+        guard let ownerProfileID = profiles.last?.id else { return }
+        let modelMissing = !preset.isAvailable(modelRoot: configuredModelRoot)
+        let projectorMissing = !preset.hasProjectorAvailable(modelRoot: configuredModelRoot)
+        guard modelMissing || projectorMissing else { return }
+        enqueuePresetDownload(preset, ownerProfileID: ownerProfileID)
+    }
+
+    /// Adds a profile for every preset not already represented among
+    /// the current profiles (matched by runtime + model path, so
+    /// running this again doesn't create duplicates), starting a
+    /// download immediately for any whose model isn't on disk yet.
+    /// That covers every MLX/vLLM-MLX preset (its modelPath is already
+    /// a Hugging Face repo ID) and any GGUF preset with a confirmed
+    /// source repo (see ProfilePreset.ggufSourceModelID) -- a GGUF
+    /// preset without one still gets added, just without an automatic
+    /// download, since guessing at an unconfirmed repo/filename could
+    /// silently fetch the wrong file. Skips any preset sized for more
+    /// unified memory than this Mac actually has, the same hardware
+    /// check missingPresets applies -- this Mac downloading (or even
+    /// just being offered) a 192 GB-tier model would be a much bigger
+    /// waste of bandwidth and disk than an unconfirmed repo ever is.
+    func addAllPresets() {
+        for preset in ProfilePreset.all {
+            guard preset.isSupported(physicalMemoryGB: currentUnifiedMemoryGB) else { continue }
+            if let existingOwnerID = profiles.first(where: { $0.runtime == preset.profile.runtime && $0.modelPath == preset.profile.modelPath })?.id {
+                // Already added as a profile in an earlier run -- don't add
+                // it again, but a vision preset added before this app knew
+                // to fetch its mmproj file may still be missing one, so
+                // queue just that backfill against the existing profile.
+                if !preset.hasProjectorAvailable(modelRoot: configuredModelRoot) {
+                    enqueuePresetDownload(preset, ownerProfileID: existingOwnerID)
+                }
+                if preset.useCases.contains(.coding) { syncCodingProfilesToOpenCode() }
+                continue
+            }
+            addPresetStartingDownloadIfNeeded(preset)
+        }
+    }
+
+    static let openCodeConfigDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config", isDirectory: true)
+        .appendingPathComponent("opencode", isDirectory: true)
+    static let openCodeConfigURL = openCodeConfigDirectory.appendingPathComponent("opencode.json")
+
+    /// Merges every current profile that came from a "Coding"-tagged
+    /// preset into OpenCode's config as a custom provider (see
+    /// OpenCodeConfigSync), so those models show up in OpenCode without
+    /// hand-editing its config file. Called automatically whenever a
+    /// coding preset is added (addPresetStartingDownloadIfNeeded/
+    /// addAllPresets above) and available as a manual "Sync now" button
+    /// in Settings for anyone who added coding presets before this
+    /// existed, or whose config needs refreshing after editing a
+    /// profile's name/context/alias by hand.
+    ///
+    /// Deliberately does nothing if OpenCode has never been set up on
+    /// this Mac (no ~/.config/opencode directory, and no `opencode`
+    /// executable found via Homebrew) -- otherwise every InferenceBar
+    /// user who has never heard of OpenCode would get a stray config
+    /// directory created the first time they add a coding preset.
+    enum OpenCodeSyncOutcome {
+        case synced(path: String)
+        case noCodingProfiles
+        case openCodeNotSetUp
+        case failed(String)
+    }
+
+    @discardableResult
+    func syncCodingProfilesToOpenCode() -> OpenCodeSyncOutcome {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: Self.openCodeConfigDirectory.path)
+            || HomebrewRuntimeManager.isInstalled(.opencode, fileManager: fileManager) else { return .openCodeNotSetUp }
+        let codingProfiles: [OpenCodeConfigSync.ProfileEntry] = profiles.compactMap { profile in
+            guard ProfilePreset.all.contains(where: {
+                $0.profile.runtime == profile.runtime && $0.profile.modelPath == profile.modelPath && $0.useCases.contains(.coding)
+            }) else { return nil }
+            return .init(alias: profile.alias, name: profile.name, contextSize: profile.contextSize, maximumOutputTokens: profile.effectiveMaximumOutputTokens)
+        }
+        guard !codingProfiles.isEmpty else { return .noCodingProfiles }
+        var existing: [String: Any] = [:]
+        if let data = try? Data(contentsOf: Self.openCodeConfigURL),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            existing = parsed
+        }
+        let apiKey = networkSettings.authenticationEnabled ? "{env:INFERENCE_API_KEY}" : "local"
+        let baseURL = "\(networkSettings.baseURL(runtime: .llamaCPP)?.absoluteString ?? "http://127.0.0.1:\(networkSettings.port)")/v1"
+        // Only honor defaultCodingProfileID if that profile is actually
+        // one of the ones being synced (still exists, still coding-tagged)
+        // -- otherwise fall through to clearing any stale "model" pointer
+        // in mergedConfig rather than writing a default alias that no
+        // longer corresponds to a real model in this same config.
+        let defaultAlias = defaultCodingProfileID
+            .flatMap { id in profiles.first(where: { $0.id == id }) }
+            .flatMap { profile in codingProfiles.first(where: { $0.alias == profile.alias })?.alias }
+        let merged = OpenCodeConfigSync.mergedConfig(existing: existing, baseURL: baseURL, apiKey: apiKey, profiles: codingProfiles, defaultModelAlias: defaultAlias)
+        do {
+            try fileManager.createDirectory(at: Self.openCodeConfigDirectory, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try data.write(to: Self.openCodeConfigURL, options: .atomic)
+            return .synced(path: Self.openCodeConfigURL.path)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    // download()/downloadMLXModel() were built around a single in-flight
+    // download at a time -- their progress (downloadProgress, downloadPhase,
+    // downloadBytesPerSecond, downloadOwnerProfileID, ...) lives in shared
+    // scalar properties, not per-job state, because until "Add all presets"
+    // existed nothing ever started more than one download at once. Firing
+    // several of these concurrently makes each one's progress callbacks
+    // stomp on those shared properties, which is exactly what made the
+    // per-profile progress bar jump around between different downloads'
+    // numbers. Rather than rework that shared state to be per-job, this
+    // queue keeps the existing single-flight assumption true by running
+    // every preset download one at a time, in order, no matter how many
+    // get queued at once.
+    private var pendingPresetDownloads: [(preset: ProfilePreset, ownerProfileID: UUID)] = []
+    private var isProcessingPresetDownloadQueue = false
+    // Read by the menu-bar dropdown so "Add all presets" queuing several
+    // downloads at once doesn't look like it silently dropped the rest --
+    // see menuNeedsUpdate in InferenceBarApp.swift.
+    var queuedPresetDownloadCount: Int { pendingPresetDownloads.count }
+
+    private func enqueuePresetDownload(_ preset: ProfilePreset, ownerProfileID: UUID) {
+        pendingPresetDownloads.append((preset, ownerProfileID))
+        guard !isProcessingPresetDownloadQueue else { return }
+        isProcessingPresetDownloadQueue = true
+        Task { await self.processPresetDownloadQueue() }
+    }
+
+    private func processPresetDownloadQueue() async {
+        while !pendingPresetDownloads.isEmpty {
+            let next = pendingPresetDownloads.removeFirst()
+            switch next.preset.profile.runtime {
+            case .llamaCPP:
+                guard let sourceModelID = next.preset.ggufSourceModelID else { continue }
+                let placeholder = HFModel(id: sourceModelID, downloads: nil, likes: nil, lastModified: nil, pipeline_tag: nil, tags: nil, usedStorage: nil)
+                if let filename = next.preset.expectedGGUFFilename, !next.preset.isAvailable(modelRoot: configuredModelRoot) {
+                    await download(file: filename, from: placeholder, to: configuredModelRoot.path, ownerProfileID: next.ownerProfileID)
+                }
+                // The projector is a companion file living in the same repo,
+                // not something a profile's modelPath ever points at, so it's
+                // fetched with ownerProfileID: nil -- passing the real owner
+                // here would reassign that profile's modelPath to the mmproj
+                // file itself once this download completes (see
+                // DownloadProfileOwnership.permitsAssignment).
+                if let mmprojFilename = next.preset.mmprojFilename, !next.preset.hasProjectorAvailable(modelRoot: configuredModelRoot) {
+                    await download(file: mmprojFilename, from: placeholder, to: configuredModelRoot.path, ownerProfileID: nil)
+                }
+            case .mlxLM, .vllmMLX:
+                await downloadMLXModel(next.preset.profile.modelPath)
+            }
+        }
+        isProcessingPresetDownloadQueue = false
+    }
+
     func duplicateProfile() {
         guard var profile = selectedProfile else { return }
         profile.id = UUID(); profile.name += " copy"
@@ -626,7 +915,23 @@ final class AppStore {
         profiles.removeAll { $0.id == id }
         favoriteProfileIDs.remove(id)
         if defaultProfileID == id { defaultProfileID = nil }
+        if defaultCodingProfileID == id { defaultCodingProfileID = nil }
         selectedProfileID = profiles.first?.id
+    }
+
+    /// Bulk delete for the Profiles window's multi-select mode. Silently
+    /// skips the running profile if it's part of the selection -- same
+    /// as deleteSelectedProfile() above never deleting it -- rather than
+    /// refusing the whole batch, so selecting "everything" and hitting
+    /// delete still removes every other profile.
+    func deleteProfiles(_ ids: Set<UUID>) {
+        let deletable = ids.filter { $0 != runningProfileID }
+        guard !deletable.isEmpty else { return }
+        profiles.removeAll { deletable.contains($0.id) }
+        favoriteProfileIDs.subtract(deletable)
+        if let defaultProfileID, deletable.contains(defaultProfileID) { self.defaultProfileID = nil }
+        if let defaultCodingProfileID, deletable.contains(defaultCodingProfileID) { self.defaultCodingProfileID = nil }
+        if let selectedProfileID, deletable.contains(selectedProfileID) { self.selectedProfileID = profiles.first?.id }
     }
 
     func search(category: ModelCategory? = nil) async {
@@ -637,10 +942,28 @@ final class AppStore {
         do {
             if !modelCategory.recommendedFamilies.isEmpty || !modelCategory.recommendedModelIDs.isEmpty {
                 var curated: [String: HFModel] = [:]
+                // A category with its own pipelineTag (e.g. "Chat with
+                // Images" -> "image-text-to-text") narrows the family
+                // search below to models Hugging Face itself tags as
+                // capable of that -- but only for MLX. For GGUF, a
+                // pipeline_tag server-side filter turns out to actively
+                // hurt this: whoever requantizes a vision model to GGUF
+                // very often doesn't bother recreating its pipeline_tag,
+                // so a straight Qwen3-VL conversion frequently shows up
+                // tagged just "text-generation" on Hugging Face (as a
+                // user found when testing this) -- filtering on that tag
+                // would silently drop good results rather than include
+                // bad ones. GGUF results are instead post-filtered below
+                // by whether the repo actually ships an mmproj file,
+                // which is the same ground truth this app already uses
+                // locally to decide whether a model can see images (see
+                // MultimodalProjector), and can't be mistagged.
                 if modelCatalogBackend == .mlxLM {
                     for family in modelCategory.recommendedFamilies {
                         var recommendedURL = URLComponents(string: "https://huggingface.co/api/models")!
-                        recommendedURL.queryItems = [.init(name: "search", value: family), .init(name: "author", value: "mlx-community"), .init(name: "sort", value: "downloads"), .init(name: "direction", value: "-1"), .init(name: "limit", value: "8"), .init(name: "full", value: "true")]
+                        var items = [URLQueryItem(name: "search", value: family), .init(name: "author", value: "mlx-community"), .init(name: "sort", value: "downloads"), .init(name: "direction", value: "-1"), .init(name: "limit", value: "8"), .init(name: "full", value: "true")]
+                        if let pipelineTag = modelCategory.pipelineTag { items.append(.init(name: "pipeline_tag", value: pipelineTag)) }
+                        recommendedURL.queryItems = items
                         guard let url = recommendedURL.url,
                               let (data, response) = try? await URLSession.shared.data(from: url),
                               let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
@@ -649,12 +972,22 @@ final class AppStore {
                     }
                 } else {
                     let families = modelCategory.recommendedFamilies
+                    let requiresVisionProjector = modelCategory.pipelineTag == "image-text-to-text"
                     for family in families {
                         var recommendedURL = URLComponents(string: "https://huggingface.co/api/models")!
-                        recommendedURL.queryItems = [.init(name: "search", value: family), .init(name: "filter", value: "gguf"), .init(name: "sort", value: "downloads"), .init(name: "direction", value: "-1"), .init(name: "limit", value: "8")]
+                        // full=true is needed here (harmlessly unused by
+                        // every other GGUF category) so `siblings` is
+                        // populated for the mmproj check below.
+                        recommendedURL.queryItems = [.init(name: "search", value: family), .init(name: "filter", value: "gguf"), .init(name: "sort", value: "downloads"), .init(name: "direction", value: "-1"), .init(name: "limit", value: "8"), .init(name: "full", value: "true")]
                         let (familyData, familyResponse) = try await URLSession.shared.data(from: recommendedURL.url!)
                         try Self.validate(familyResponse)
-                        for model in try JSONDecoder().decode([HFModel].self, from: familyData) { curated[model.id] = model }
+                        for model in try JSONDecoder().decode([HFModel].self, from: familyData) {
+                            if requiresVisionProjector {
+                                let siblingNames = (model.siblings ?? []).map(\.rfilename)
+                                guard MultimodalProjector.hasProjectorSibling(among: siblingNames) else { continue }
+                            }
+                            curated[model.id] = model
+                        }
                     }
                 }
                 for modelID in modelCategory.recommendedModelIDs {
@@ -1287,7 +1620,7 @@ final class AppStore {
                 }
                 self.stopForceKillTask?.cancel(); self.stopForceKillTask = nil
                 self.process = nil; self.runningProfileID = nil; self.outputTask = nil
-                self.runtimeMemoryBytes = 0; self.runtimeStartedAt = nil
+                self.runtimeMemoryBytes = 0; self.runtimeStartedAt = nil; self.lastObservedActiveRequests = 0
             }
         }
         do {
@@ -1297,6 +1630,22 @@ final class AppStore {
                 while !Task.isCancelled, task?.isRunning == true {
                     guard let pid = task?.processIdentifier else { break }
                     self?.runtimeMemoryBytes = await Self.residentMemoryBytes(pid: pid)
+                    // Piggybacks on this existing 1-second poll instead of
+                    // adding a second timer: any client hitting the running
+                    // server (InferenceBar's own chat, the CLI tool,
+                    // opencode, anything else on the OpenAI-compatible API)
+                    // shows up in the server's own log output, which
+                    // runtimeHealth already parses regardless of who sent
+                    // the request. Only posts when the count actually
+                    // changes, so an idle server generates no extra
+                    // notifications or icon redraws.
+                    if let self {
+                        let activeRequests = self.runtimeHealth.activeRequests
+                        if activeRequests != self.lastObservedActiveRequests {
+                            self.lastObservedActiveRequests = activeRequests
+                            NotificationCenter.default.post(name: .inferenceServerLifecycleChanged, object: nil)
+                        }
+                    }
                     try? await Task.sleep(for: .seconds(1))
                 }
             }
@@ -1555,6 +1904,14 @@ final class AppStore {
     // it stands (up to and including the last user message) rather than
     // pulling a new message from `prompt`/pendingChatAttachments.
     private func sendPrompt(appendingUserPrompt: Bool = true) async {
+        // Registered before the early-return guard below on purpose: that
+        // guard can bail out before ever reaching the isSending-scoped
+        // defer further down, which would otherwise leave
+        // chatGenerationTask stuck non-nil forever -- every future send
+        // silently no-ops on beginSendingPrompt()'s own `chatGenerationTask
+        // == nil` guard, with no error shown and the Send button still
+        // looking enabled, since it only checks isRunning.
+        defer { chatGenerationTask = nil }
         guard isRunning, serverLifecycle == .running,
               let profile = profiles.first(where: { $0.id == runningProfileID }),
               let base = networkSettings.baseURL(runtime: profile.runtime),
@@ -1584,7 +1941,7 @@ final class AppStore {
         isSending = true
         let reasoningMode = profile.reasoning.lowercased()
         engineActivity = reasoningMode == "auto" ? .thinking : (!reasoningMode.isEmpty && reasoningMode != "none" && reasoningMode != "off" ? .reasoning : .generating)
-        defer { engineActivity = .idle; isSending = false; chatGenerationTask = nil }
+        defer { engineActivity = .idle; isSending = false }
         do {
             // llama-server assigns requests to reusable KV slots. Other clients
             // (notably OpenCode) may have populated those slots on the same
@@ -1792,6 +2149,10 @@ final class AppStore {
     /// understands.
     private func attachChatImage(_ url: URL) {
         guard !pendingChatImageAttachments.contains(where: { $0.path == url.path }) else { return }
+        guard !runningProfileLacksVisionProjector else {
+            handleMissingRunningProjector()
+            return
+        }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         do {
@@ -1811,10 +2172,40 @@ final class AppStore {
     /// raw bytes rather than a file on disk — a paste from the clipboard
     /// (⌘V of a screenshot) rather than a dropped or picked file.
     func attachChatImage(pasteboardData data: Data, suggestedName: String) {
+        guard !runningProfileLacksVisionProjector else {
+            handleMissingRunningProjector()
+            return
+        }
         do {
             try ingestImageData(data, name: suggestedName, path: "clipboard-\(UUID().uuidString)", preferPNG: true)
         } catch {
             errorMessage = "Could not attach the pasted image."
+        }
+    }
+
+    /// Called wherever an image attachment is refused because the running
+    /// profile has no vision projector on disk yet. Previously this just
+    /// dead-ended with a static "switch to a vision-capable model" alert
+    /// -- even for one of this app's own vision presets (Qwen3-VL,
+    /// Mistral Small 3.1, Gemma 3 12B), whose profile really is the right
+    /// model, just missing the mmproj file an older build of this app
+    /// never fetched (see ProfilePreset.mmprojFilename). When the running
+    /// profile matches one of those by runtime+modelPath, start fetching
+    /// just the missing projector (the same backfill "Add all presets"
+    /// uses) instead of leaving the user stuck re-discovering that fix on
+    /// their own. Anything else -- a custom or unconfirmed model -- still
+    /// gets the original message.
+    private func handleMissingRunningProjector() {
+        guard let profile = profiles.first(where: { $0.id == runningProfileID }) else {
+            errorMessage = "The running profile has no vision support — it can't be sent an image. Switch to a vision-capable model (one with a projector file) first."
+            return
+        }
+        if let preset = ProfilePreset.all.first(where: { $0.profile.runtime == profile.runtime && $0.profile.modelPath == profile.modelPath }),
+           preset.mmprojFilename != nil {
+            errorMessage = "This model's vision projector file isn't downloaded yet -- fetching it now. Check the Downloads window, then try attaching the image again once it finishes."
+            enqueuePresetDownload(preset, ownerProfileID: profile.id)
+        } else {
+            errorMessage = "The running profile has no vision support — it can't be sent an image. Switch to a vision-capable model (one with a projector file) first."
         }
     }
 
@@ -1907,15 +2298,15 @@ final class AppStore {
         return parts
     }
 
-    /// Whether the running profile is a llama.cpp model with no mmproj
-    /// projector detected next to it — used only to show a non-blocking
-    /// heads-up in the composer when the user has attached an image that
-    /// the model is very likely to just ignore. Silent (false) for MLX
-    /// and vLLM-MLX profiles, which don't use --mmproj at all here and
-    /// may still support vision input on their own.
+    /// Whether the running profile can't take image input, and image
+    /// attachments should therefore be refused outright rather than
+    /// queued and sent — see ChatImageAttachmentPolicy.blocksImageAttachment.
     var runningProfileLacksVisionProjector: Bool {
-        guard let profile = profiles.first(where: { $0.id == runningProfileID }), profile.runtime == .llamaCPP else { return false }
-        return MultimodalProjector.path(forModelPath: profile.modelPath) == nil
+        guard let profile = profiles.first(where: { $0.id == runningProfileID }) else { return false }
+        return ChatImageAttachmentPolicy.blocksImageAttachment(
+            runtime: profile.runtime,
+            hasProjector: MultimodalProjector.path(forModelPath: profile.modelPath) != nil
+        )
     }
 
     func newChat(projectID: UUID? = nil) {
@@ -2259,16 +2650,63 @@ private enum ChecksumVerifier {
     }
 }
 
-private final class DownloadController: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+/// Downloads one GGUF file, either as a single stream (the original
+/// behavior, still used as a fallback) or as several concurrent HTTP
+/// Range requests sharing one destination file (see
+/// ParallelDownloadPlanner in Models.swift for why that's faster
+/// against Hugging Face's CDN). Callers (AppStore.download(file:...))
+/// don't need to know which path ran -- both report progress and
+/// return a DownloadChecksumResult the same way.
+///
+/// Only the single-stream path can resume across a pause/cancel that
+/// outlives the app process: its resumeData is opaque URLSession state
+/// with nowhere to persist an equivalent for four independent byte
+/// ranges, so a parallel download that's cancelled or fails restarts
+/// from scratch on the next attempt -- the same thing the existing
+/// checksum-mismatch retry already does today, and still fast since it
+/// re-splits into parallel ranges again rather than falling back to one
+/// stream. Pausing and resuming *within* the same run (the common
+/// case -- the pause button in ProfileEditor) works for both paths,
+/// since URLSessionTask.suspend()/resume() applies equally to a data
+/// task and a download task.
+///
+/// All the delegate callbacks below run one at a time on `session`'s
+/// own private delegate queue (URLSession's guarantee when it's handed
+/// `delegateQueue: nil`), even though up to four of this session's data
+/// tasks are in flight together -- so the mutable per-chunk bookkeeping
+/// here needs no locking of its own.
+private final class DownloadController: NSObject, URLSessionDataDelegate, URLSessionDownloadDelegate, @unchecked Sendable {
     private var continuation: CheckedContinuation<DownloadChecksumResult, Error>?
     private var destination: URL?
     private var progressHandler: (@MainActor @Sendable (Int64, Int64) -> Void)?
     private var phaseHandler: (@MainActor @Sendable (String) -> Void)?
     private var session: URLSession?
     private var finished = false
-    private var task: URLSessionDownloadTask?
     private var expectedSHA256: String?
     private var source: URL?
+
+    // Single-stream fallback: used when the source doesn't advertise
+    // Range support, is too small to be worth splitting, or a previous
+    // run of this same destination already left resumeData behind.
+    private var fallbackTask: URLSessionDownloadTask?
+
+    // Parallel chunked download.
+    private struct Chunk {
+        let range: ClosedRange<Int64>
+        var written: Int64 = 0
+        var task: URLSessionDataTask?
+    }
+    private var chunks: [Chunk] = []
+    private var chunkIndexByTaskIdentifier: [Int: Int] = [:]
+    private var fileHandle: FileHandle?
+    private var totalBytesExpected: Int64 = 0
+    private var completedChunkCount = 0
+    private var chunksFailed = false
+    // Covers the brief async gap (the Range probe below) between
+    // activeDownloader being handed to the caller and any actual task
+    // existing to cancel -- without this, a cancel() that lands in that
+    // window would silently do nothing instead of stopping the download.
+    private var cancelRequested = false
 
     func download(
         from source: URL,
@@ -2282,33 +2720,74 @@ private final class DownloadController: NSObject, URLSessionDownloadDelegate, @u
         self.expectedSHA256 = expectedSHA256
         self.progressHandler = progress
         self.phaseHandler = phase
-        return try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            let configuration = URLSessionConfiguration.default
-            configuration.timeoutIntervalForRequest = 120
-            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-            self.session = session
-            let task: URLSessionDownloadTask
-            if let resumeData = DownloadResumeStore.load(for: destination), !resumeData.isEmpty {
-                task = session.downloadTask(withResumeData: resumeData)
-                if let phaseHandler { Task { @MainActor in phaseHandler("Resuming download") } }
-            } else {
-                var request = URLRequest(url: source, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 120)
-                request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-                request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-                task = session.downloadTask(with: request)
+
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 120
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        self.session = session
+
+        if let resumeData = DownloadResumeStore.load(for: destination), !resumeData.isEmpty {
+            if let phaseHandler = self.phaseHandler { Task { @MainActor in phaseHandler("Resuming download") } }
+            return try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                let task = session.downloadTask(withResumeData: resumeData)
+                self.fallbackTask = task
+                task.resume()
             }
-            self.task = task
-            task.resume()
         }
+
+        let totalBytes = await Self.probeRangeSupport(source: source)
+        if cancelRequested { throw CancellationError() }
+        if let totalBytes, ParallelDownloadPlanner.shouldSplit(totalBytes: totalBytes) {
+            do {
+                return try await runParallel(totalBytes: totalBytes)
+            } catch is ParallelSetupFailure {
+                // Couldn't even get as far as issuing the chunk requests
+                // (e.g. the destination file couldn't be preallocated) --
+                // fall through to the plain single-stream path below
+                // rather than failing the whole download over something
+                // that path doesn't need at all.
+            }
+        }
+        return try await runFallback()
     }
 
-    func pause() { task?.suspend() }
-    func resume() { task?.resume() }
+    func pause() {
+        if let fallbackTask { fallbackTask.suspend(); return }
+        for chunk in chunks { chunk.task?.suspend() }
+    }
+
+    func resume() {
+        if let fallbackTask { fallbackTask.resume(); return }
+        for chunk in chunks { chunk.task?.resume() }
+    }
+
     func cancel() {
-        guard let task, let destination else { return }
-        task.cancel { resumeData in
-            if let resumeData, !resumeData.isEmpty { try? DownloadResumeStore.save(resumeData, for: destination) }
+        if let fallbackTask, let destination {
+            fallbackTask.cancel { resumeData in
+                if let resumeData, !resumeData.isEmpty { try? DownloadResumeStore.save(resumeData, for: destination) }
+            }
+            return
+        }
+        if !chunks.isEmpty {
+            for chunk in chunks { chunk.task?.cancel() }
+            return
+        }
+        cancelRequested = true
+    }
+
+    // MARK: - Single-stream fallback
+
+    private func runFallback() async throws -> DownloadChecksumResult {
+        guard let source, let session else { throw URLError(.unknown) }
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            var request = URLRequest(url: source, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 120)
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+            let task = session.downloadTask(with: request)
+            self.fallbackTask = task
+            task.resume()
         }
     }
 
@@ -2353,13 +2832,158 @@ private final class DownloadController: NSObject, URLSessionDownloadDelegate, @u
         }
     }
 
+    // MARK: - Parallel chunked download
+
+    private struct ParallelSetupFailure: Error {}
+
+    /// A lightweight "Range: bytes=0-0" probe: if Hugging Face's CDN
+    /// answers 206 with a Content-Range total, splitting is worth
+    /// trying; anything else (200 meaning the range was ignored, a
+    /// non-CDN host, a network hiccup) means "don't know, don't split".
+    /// Uses a plain, delegate-less session so it can't interfere with
+    /// the real download's URLSession below.
+    private static func probeRangeSupport(source: URL) async -> Int64? {
+        var request = URLRequest(url: source, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 206,
+              let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+              let slashIndex = contentRange.lastIndex(of: "/"),
+              let total = Int64(contentRange[contentRange.index(after: slashIndex)...]) else { return nil }
+        return total
+    }
+
+    private func runParallel(totalBytes: Int64) async throws -> DownloadChecksumResult {
+        guard let destination, let source, let session else { throw ParallelSetupFailure() }
+        let directory = destination.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: destination.path) {
+                guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw ParallelSetupFailure() }
+            }
+            let handle = try FileHandle(forWritingTo: destination)
+            try handle.truncate(atOffset: UInt64(totalBytes))
+            self.fileHandle = handle
+        } catch {
+            throw ParallelSetupFailure()
+        }
+        self.totalBytesExpected = totalBytes
+        self.chunks = ParallelDownloadPlanner.chunkRanges(totalBytes: totalBytes).map { Chunk(range: $0) }
+        self.completedChunkCount = 0
+        self.chunksFailed = false
+        if let phaseHandler { Task { @MainActor in phaseHandler("Downloading (parallel)") } }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            for index in chunks.indices {
+                var request = URLRequest(url: source, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 120)
+                request.setValue("bytes=\(chunks[index].range.lowerBound)-\(chunks[index].range.upperBound)", forHTTPHeaderField: "Range")
+                request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+                let task = session.dataTask(with: request)
+                chunkIndexByTaskIdentifier[task.taskIdentifier] = index
+                chunks[index].task = task
+                task.resume()
+            }
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 206 else {
+            completionHandler(.cancel)
+            failChunks(with: URLError(.cannotDecodeContentData))
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let index = chunkIndexByTaskIdentifier[dataTask.taskIdentifier], let fileHandle else { return }
+        let offset = chunks[index].range.lowerBound + chunks[index].written
+        do {
+            try fileHandle.seek(toOffset: UInt64(offset))
+            try fileHandle.write(contentsOf: data)
+        } catch {
+            failChunks(with: error)
+            return
+        }
+        chunks[index].written += Int64(data.count)
+        let totalWritten = chunks.reduce(Int64(0)) { $0 + $1.written }
+        if let progressHandler {
+            let total = totalBytesExpected
+            Task { @MainActor in progressHandler(totalWritten, total) }
+        }
+    }
+
+    /// Shared by the fallback (download task) and parallel (data task)
+    /// paths -- URLSession calls this for either kind, distinguished by
+    /// which one is actually in flight for this controller.
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let dataTask = task as? URLSessionDataTask, let index = chunkIndexByTaskIdentifier[dataTask.taskIdentifier] {
+            handleChunkCompletion(index: index, error: error)
+            return
+        }
         if let error {
             let nsError = error as NSError
             if let destination,
                let resumeData = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
                !resumeData.isEmpty {
                 try? DownloadResumeStore.save(resumeData, for: destination)
+            }
+            finish(.failure(error))
+        }
+    }
+
+    private func handleChunkCompletion(index: Int, error: Error?) {
+        if let error {
+            failChunks(with: error)
+            return
+        }
+        let expectedLength = chunks[index].range.upperBound - chunks[index].range.lowerBound + 1
+        guard chunks[index].written >= expectedLength else {
+            // The connection closed without an error but also without
+            // delivering this chunk's full range -- a short read is
+            // still a failure, not a silently-truncated file.
+            failChunks(with: URLError(.zeroByteResource))
+            return
+        }
+        completedChunkCount += 1
+        guard completedChunkCount == chunks.count else { return }
+        finishParallelDownload()
+    }
+
+    private func failChunks(with error: Error) {
+        guard !chunksFailed else { return }
+        chunksFailed = true
+        for chunk in chunks { chunk.task?.cancel() }
+        try? fileHandle?.close()
+        fileHandle = nil
+        if let destination { try? FileManager.default.removeItem(at: destination) }
+        finish(.failure(error))
+    }
+
+    private func finishParallelDownload() {
+        guard let destination else { return finish(.failure(URLError(.cannotCreateFile))) }
+        do {
+            try fileHandle?.close()
+            fileHandle = nil
+            let checksum: DownloadChecksumResult
+            if let expectedSHA256 {
+                if let phaseHandler { Task { @MainActor in phaseHandler("Verifying checksum") } }
+                let actual = try ChecksumVerifier.sha256(of: destination)
+                guard actual == expectedSHA256 else { throw NSError(domain: "InferenceBar.Checksum", code: 2, userInfo: [NSLocalizedDescriptionKey: "Downloaded file checksum mismatch. Expected \(expectedSHA256), got \(actual)."]) }
+                checksum = .verified
+            } else { checksum = .unavailable }
+            finish(.success(checksum))
+        } catch {
+            if (error as NSError).domain == "InferenceBar.Checksum" {
+                try? FileManager.default.removeItem(at: destination)
             }
             finish(.failure(error))
         }

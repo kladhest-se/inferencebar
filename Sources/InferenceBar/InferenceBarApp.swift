@@ -42,6 +42,7 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
     private var statusItem: NSStatusItem!
     private var profilesWindow: NSWindow?
     private var modelStoreWindow: NSWindow?
+    private var downloadsWindow: NSWindow?
     private var chatWindow: NSWindow?
     private var logsWindow: NSWindow?
     private var settingsWindow: NSWindow?
@@ -147,6 +148,13 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
             status = store.engineActivity.label.isEmpty ? "working" : store.engineActivity.label.lowercased()
             color = activityColor(store.engineActivity)
         }
+        else if store.serverLifecycle == .running && store.runtimeHealth.activeRequests > 0 {
+            // Not InferenceBar's own chat (that's isSending above) --
+            // some other client (the CLI tool, opencode, anything else
+            // talking to the OpenAI-compatible endpoint) is mid-request.
+            status = "handling an external request"
+            color = .systemIndigo
+        }
         else {
             (color, status) = switch store.serverLifecycle {
             case .stopped: (.secondaryLabelColor, "stopped")
@@ -203,6 +211,32 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
             menu.addItem(update)
             menu.addItem(.separator())
         }
+        // Only the currently selected profile in Profiles' own editor shows
+        // this otherwise -- navigate to a different profile (or close the
+        // window) and it's invisible until you click back. Reading it here
+        // instead means it survives that, the same way the status-icon's
+        // external-request indicator already doesn't depend on any one
+        // window being open.
+        if store.isDownloading || store.isResolvingDownload {
+            let title = DownloadMenuBarPresentation.summary(
+                modelName: store.downloadModelName,
+                isResolving: store.isResolvingDownload,
+                status: store.downloadStatus,
+                progress: store.downloadProgress,
+                totalBytes: store.downloadTotalBytes,
+                bytesPerSecond: store.downloadBytesPerSecond
+            )
+            let downloading = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            downloading.image = menuImage("arrow.down.circle", description: "Downloading model")
+            downloading.isEnabled = false
+            menu.addItem(downloading)
+            if store.queuedPresetDownloadCount > 0 {
+                let queued = NSMenuItem(title: "\(store.queuedPresetDownloadCount) more queued", action: nil, keyEquivalent: "")
+                queued.isEnabled = false
+                menu.addItem(queued)
+            }
+            menu.addItem(.separator())
+        }
         if MenuBarLifecyclePresentation.locksProfileSelection(store.serverLifecycle),
            let running = store.profiles.first(where: { $0.id == store.runningProfileID }) {
             let title = MenuBarLifecyclePresentation.profileTitle(name: running.name, lifecycle: store.serverLifecycle, activity: store.engineActivity, isSending: store.isSending)
@@ -214,6 +248,12 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
             engine.image = menuImage("gearshape.2", description: "Inference engine")
             engine.isEnabled = false
             menu.addItem(engine)
+            if let externalLabel = MenuBarLifecyclePresentation.externalRequestLabel(lifecycle: store.serverLifecycle, isSending: store.isSending, activeRequests: store.runtimeHealth.activeRequests) {
+                let external = NSMenuItem(title: externalLabel, action: nil, keyEquivalent: "")
+                external.image = menuImage("network", description: "External request active")
+                external.isEnabled = false
+                menu.addItem(external)
+            }
             menu.addItem(.separator())
             if store.serverLifecycle == .stopping {
                 let stopping = NSMenuItem(title: "Stopping model…", action: nil, keyEquivalent: "")
@@ -275,6 +315,9 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
         let manageMenu = NSMenu()
         manageMenu.addItem(menuItem("Profiles", action: #selector(openProfiles), systemImage: "person.crop.rectangle.stack"))
         manageMenu.addItem(menuItem("Models", action: #selector(openModels), systemImage: "shippingbox"))
+        let downloadsMenuItem = menuItem("Downloads", action: #selector(openDownloads), systemImage: "arrow.down.circle")
+        if !store.downloadJobs.isEmpty { downloadsMenuItem.title = "Downloads (\(store.downloadJobs.count))" }
+        manageMenu.addItem(downloadsMenuItem)
         manageItem.submenu = manageMenu
         menu.addItem(manageItem)
         menu.addItem(menuItem("Logs", action: #selector(openLogs), systemImage: "doc.text.magnifyingglass"))
@@ -364,6 +407,16 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
     @objc private func openModels() {
         if modelStoreWindow == nil { modelStoreWindow = makeWindow(root: ModelStoreWindowView().environment(store), title: "Model Store", size: NSSize(width: 1240, height: 800), minimum: NSSize(width: 880, height: 600)) }
         show(modelStoreWindow)
+    }
+    @objc private func openDownloads() {
+        // The list pane and detail pane inside DownloadsView's HSplitView
+        // declare minWidths of 430 and 310 (see ContentView.swift) -- the
+        // window's own minimum must be at least that combined width plus
+        // the split divider, or SwiftUI can't satisfy both panes' minimums
+        // at once and the layout visibly breaks down (overlapping/garbled
+        // text) as the window is resized down toward it.
+        if downloadsWindow == nil { downloadsWindow = makeWindow(root: DownloadsView().environment(store), title: "Downloads", size: NSSize(width: 900, height: 580), minimum: NSSize(width: 780, height: 460)) }
+        show(downloadsWindow)
     }
     @objc private func openChat() {
         if chatWindow == nil { chatWindow = makeWindow(root: PromptView().environment(store), title: "Chat", size: NSSize(width: 780, height: 720), minimum: NSSize(width: 520, height: 460)) }

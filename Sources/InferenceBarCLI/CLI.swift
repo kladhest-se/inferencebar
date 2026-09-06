@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// `inferencebar ask "..."` — pipes a one-off prompt to whatever
+/// `inference ask "..."` — pipes a one-off prompt to whatever
 /// InferenceBar profile is currently running and prints the answer, so
 /// the local model is reachable from a terminal or another script
 /// without going through the Chat window. Deliberately minimal: no
@@ -12,7 +12,7 @@ import Foundation
 /// would: reads host/port/TLS/auth from the app's own
 /// server-settings.json (see ServerSettings) and, when authentication is
 /// on, the API key from the Keychain (see APIKeyKeychain) or
-/// INFERENCEBAR_API_KEY. It has no way to know *which* profile is
+/// INFERENCE_API_KEY. It has no way to know *which* profile is
 /// running — that's in-memory-only app state, never written to disk —
 /// but doesn't need to: only one server is ever running at a time, on
 /// whatever host/port InferenceBar's network settings say, and the
@@ -30,13 +30,13 @@ struct CLI {
             printUsage()
             exit(1)
         case .unknownCommand(let command):
-            standardError("inferencebar: unknown command \"\(command)\"\n")
+            standardError("inference: unknown command \"\(command)\"\n")
             printUsage()
             exit(1)
         case .ask(let promptFromArguments):
             let prompt = promptFromArguments ?? readStdin()
             guard !prompt.isEmpty else {
-                standardError("inferencebar ask: no prompt given — pass it as an argument or pipe one in on stdin.\n")
+                standardError("inference ask: no prompt given — pass it as an argument or pipe one in on stdin.\n")
                 exit(1)
             }
             exit(await ask(prompt))
@@ -51,14 +51,14 @@ struct CLI {
     private static func ask(_ prompt: String) async -> Int32 {
         let environment = ProcessInfo.processInfo.environment
         let settings = ServerSettings.load()
-        let apiKey = environment["INFERENCEBAR_API_KEY"]
+        let apiKey = environment["INFERENCE_API_KEY"]
             ?? (settings.authenticationEnabled ? APIKeyKeychain.load() : "")
         let candidates = settings.candidateBaseURLs(
-            host: environment["INFERENCEBAR_HOST"],
-            port: environment["INFERENCEBAR_PORT"].flatMap(Int.init)
+            host: environment["INFERENCE_HOST"],
+            port: environment["INFERENCE_PORT"].flatMap(Int.init)
         )
         guard !candidates.isEmpty else {
-            standardError("inferencebar ask: could not build a request URL from the configured host/port.\n")
+            standardError("inference ask: could not build a request URL from the configured host/port.\n")
             return 1
         }
 
@@ -71,14 +71,14 @@ struct CLI {
                 // A real server answered and it wasn't happy — that's
                 // the definitive outcome, not a reason to try the next
                 // candidate scheme.
-                standardError("inferencebar ask: \(message)\n")
+                standardError("inference ask: \(message)\n")
                 return 1
             case .couldNotConnect(let message):
                 lastFailure = message
                 continue
             }
         }
-        standardError("inferencebar ask: could not reach a running InferenceBar profile at \(settings.clientHost):\(settings.port)\(lastFailure.map { " (\($0))" } ?? "").\n")
+        standardError("inference ask: could not reach a running InferenceBar profile at \(settings.clientHost):\(settings.port)\(lastFailure.map { " (\($0))" } ?? "").\n")
         return 1
     }
 
@@ -126,8 +126,8 @@ struct CLI {
 
     private static func printUsage() {
         print("""
-        Usage: inferencebar ask "<prompt>"
-               echo "<prompt>" | inferencebar ask
+        Usage: inference ask "<prompt>"
+               echo "<prompt>" | inference ask
 
         Sends a one-off prompt to whatever InferenceBar profile is currently
         running and prints the answer. Reads the server's host, port, and
@@ -136,9 +136,9 @@ struct CLI {
         Mac InferenceBar is running on.
 
         Environment overrides:
-          INFERENCEBAR_HOST      talk to a different host (e.g. another Mac on your network)
-          INFERENCEBAR_PORT      talk to a different port
-          INFERENCEBAR_API_KEY   use this key instead of reading it from the Keychain
+          INFERENCE_HOST         talk to a different host (e.g. another Mac on your network)
+          INFERENCE_PORT         talk to a different port
+          INFERENCE_API_KEY      use this key instead of reading it from the Keychain
         """)
     }
 }

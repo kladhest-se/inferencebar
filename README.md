@@ -12,7 +12,7 @@ InferenceBar is a native SwiftUI menu-bar application for downloading, configuri
 - Local chat with streaming, Markdown, code highlighting, regenerate and edit-and-resend, a context-window usage indicator, text and image attachments (drop, pick, or paste a screenshot for vision-capable models), cancellation, and saved conversations — exportable to Markdown.
 - Optional web search (against your own SearXNG instance) and single-page fetching, each toggleable per chat.
 - Optional TLS (llama.cpp), a keychain-stored API key, crash notifications, opt-in auto-restart, and a global keyboard shortcut for the Chat window.
-- Optional `inferencebar` command-line tool (`inferencebar ask "..."`) for scripting against whatever profile is currently running, installable from Settings or `make install-cli`.
+- Optional `inference` command-line tool (`inference ask "..."`) for scripting against whatever profile is currently running, installable from Settings or `make install-cli`.
 
 ## Requirements for running the app
 
@@ -51,8 +51,8 @@ make macos-archive  # Create the source archive in outputs/
 make macos-install  # Build, sign, and install in /Applications
 make macos-release  # Build a signed release ZIP in outputs/
 make macos-package  # Build a signed release DMG for a GitHub release
-make cli            # Build just the inferencebar-cli command-line tool
-make install-cli    # Build the CLI and install it on your PATH as `inferencebar`
+make cli            # Build just the inference-cli command-line tool
+make install-cli    # Build the CLI and install it on your PATH as `inference`
 make help           # Show all available commands
 make clean          # Remove local build products
 ```
@@ -107,22 +107,22 @@ Application data is stored under `~/Library/Application Support/InferenceBar`. T
 
 ## Command-line tool
 
-`inferencebar ask "<prompt>"` sends a one-off prompt to whatever profile is
+`inference ask "<prompt>"` sends a one-off prompt to whatever profile is
 currently running and prints the answer — handy for scripting against your
 local model from a terminal or another script without opening the Chat
 window. Install it from InferenceBar's Settings ("Command-line tool" →
-Install), which copies the bundled binary onto your `PATH`
-(`/opt/homebrew/bin` if writable, otherwise `~/.local/bin`); building from
+Install), which copies the bundled binary onto your `PATH` (preferring
+`/usr/local/bin`, with a one-time admin prompt if needed); building from
 source instead, `make install-cli` does the same thing.
 
 ```sh
-inferencebar ask "what's 2 + 2?"
-echo "summarize this" | inferencebar ask
+inference ask "what's 2 + 2?"
+echo "summarize this" | inference ask
 ```
 
 It reads the server's host, port, and (if enabled) API key from
-InferenceBar's own settings automatically. `INFERENCEBAR_HOST`,
-`INFERENCEBAR_PORT`, and `INFERENCEBAR_API_KEY` override those — the last
+InferenceBar's own settings automatically. `INFERENCE_HOST`,
+`INFERENCE_PORT`, and `INFERENCE_API_KEY` override those — the last
 one is also the reliable option for scripted or headless use, since a
 keychain item created by InferenceBar.app can prompt for permission (or
 fail silently with no GUI session to answer it in) the first time a
