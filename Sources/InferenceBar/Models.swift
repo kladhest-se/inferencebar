@@ -1641,6 +1641,125 @@ struct ProfilePreset: Identifiable {
             summary: "Flagship MoE preset; approximately 132 GB of weights with the native 40K context",
             profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 235B A22B · Studio Ultra", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-235B-A22B-4bit", alias: "qwen3-235b-a22b", contextSize: 40960, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
             useCases: [.coding, .chat]
+        ),
+        // --- M5-generation MacBooks ------------------------------------
+        // Apple's M5 Pro tops out at 64 GB and the M5 Max at 128 GB
+        // (614 GB/s), so the 64 GB tier is the one most M5 Max owners
+        // land on. Qwen3.8 27B (architecture qwen35, a vision-capable
+        // dense model) ships a ready-made GGUF + mmproj in ggml-org's repo
+        // -- Q4_K_M 19.4 GB, Q8_0 28.6 GB, projector 0.63 GB -- and its
+        // filename tokenizes to the same family as its projector
+        // ("qwen3","8","27b"), so MultimodalProjector pairs them
+        // correctly. macOS lets the GPU wire roughly 75% of unified
+        // memory by default, so each preset below is sized to stay under
+        // that ceiling (weights + KV cache + the projector), not just
+        // under total RAM.
+        ProfilePreset(
+            id: "gguf-qwen38-27b-q8-m5max-64",
+            title: "Qwen3.8 27B · Q8_0 · Vision",
+            hardware: "MacBook Pro M5 Max · 64 GB",
+            summary: "Near-lossless dense 27B with image input; about 29 GB with the projector and a 64K context",
+            profile: ServerProfile(name: "Qwen3.8 27B Q8 · M5 Max 64 GB", modelPath: "~/ai-models/Qwen3.8-27B-Q8_0.gguf", alias: "qwen3.8-27b", contextSize: 65536, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "ggml-org/Qwen3.8-27B-GGUF",
+            useCases: [.coding, .chat, .visionChat],
+            mmprojFilename: "mmproj-Qwen3.8-27B-Q8_0.gguf"
+        ),
+        ProfilePreset(
+            id: "gguf-qwen36-35b-q8-m5max-64",
+            title: "Qwen 3.6 35B A3B · Q8_0",
+            hardware: "MacBook Pro M5 Max · 64 GB",
+            summary: "Fast MoE at Q8 quality; about 38 GB of weights, so the context is held at 64K to leave headroom",
+            profile: ServerProfile(name: "Qwen 3.6 35B Q8 · M5 Max 64 GB", modelPath: "~/ai-models/Qwen_Qwen3.6-35B-A3B-Q8_0.gguf", alias: "qwen3.6-35b-a3b-q8", contextSize: 65536, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF",
+            useCases: [.coding, .chat, .homeAutomation]
+        ),
+        ProfilePreset(
+            id: "mlx-qwen38-27b-8bit-m5max-64",
+            title: "Qwen3.8 27B · MLX 8-bit",
+            hardware: "MacBook Pro M5 Max · 64 GB",
+            summary: "Native Apple MLX runtime for the M5's GPU neural accelerators; about 30 GB of weights with a 64K context",
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3.8 27B 8-bit · M5 Max 64 GB", executable: "mlx_lm.server", modelPath: "lmstudio-community/Qwen3.8-27B-MLX-8bit", alias: "qwen3.8-27b-mlx", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            // lmstudio-community's 8-bit build (29.5 GB) -- mlx-community's
+            // own "8bit" repo is roughly twice that size, so it isn't the
+            // 8-bit this tier is sized for.
+            useCases: [.coding, .chat]
+        ),
+        // OpenCode-oriented coding tier. Qwen3-Coder 30B A3B is a
+        // non-thinking agentic coder (48 layers, 4 KV heads, so roughly
+        // 96 KB of fp16 KV cache per token): a 96K window costs ~9.7 GB
+        // and 128K ~12.9 GB on top of the weights. Each preset below keeps
+        // weights + KV under ~75% of unified memory, and runs --jinja so
+        // llama.cpp parses the model's native tool-call format.
+        ProfilePreset(
+            id: "gguf-qwen3-coder-30b-q8-m5max-64",
+            title: "Qwen3 Coder 30B A3B · Q8_0 · OpenCode",
+            hardware: "MacBook Pro M5 Max · 64 GB",
+            summary: "Agentic coder for OpenCode at Q8 quality; about 32.5 GB of weights plus a 96K context (~42 GB total)",
+            profile: ServerProfile(name: "Qwen3 Coder 30B Q8 · M5 Max 64 GB", modelPath: "~/ai-models/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf", alias: "qwen3-coder-30b-q8", contextSize: 98304, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            useCases: [.coding, .systems]
+        ),
+        ProfilePreset(
+            id: "mlx-qwen3-coder-30b-8bit-m5max-64",
+            title: "Qwen3 Coder 30B A3B · MLX 8-bit · OpenCode",
+            hardware: "MacBook Pro M5 Max · 64 GB",
+            summary: "Same agentic coder on the native MLX runtime; about 32.4 GB of weights plus a 96K context",
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3 Coder 30B 8-bit · M5 Max 64 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", alias: "qwen3-coder-30b-mlx-8bit", contextSize: 98304, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .systems]
+        ),
+        ProfilePreset(
+            id: "gguf-qwen3-coder-30b-q4-m5pro-48",
+            title: "Qwen3 Coder 30B A3B · Q4_K_M · OpenCode",
+            hardware: "MacBook Pro M5 Pro · 48 GB",
+            summary: "Agentic coder with a full 128K window for OpenCode; about 18.6 GB of weights plus ~12.9 GB of context",
+            profile: ServerProfile(name: "Qwen3 Coder 30B · M5 Pro 48 GB", modelPath: "~/ai-models/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", alias: "qwen3-coder-30b-q4", contextSize: 131072, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            useCases: [.coding, .systems]
+        ),
+        ProfilePreset(
+            id: "gguf-qwen3-coder-30b-q4-32",
+            title: "Qwen3 Coder 30B A3B · Q4_K_M · OpenCode",
+            hardware: "MacBook Air / Pro M5 · 32 GB",
+            summary: "Agentic coder squeezed into 32 GB; about 18.6 GB of weights plus a 32K context",
+            profile: ServerProfile(name: "Qwen3 Coder 30B · M5 32 GB", modelPath: "~/ai-models/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", alias: "qwen3-coder-30b-q4-32", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            ggufSourceModelID: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            useCases: [.coding, .systems]
+        ),
+        ProfilePreset(
+            id: "gguf-qwen38-27b-q4-m5pro-48",
+            title: "Qwen3.8 27B · Q4_K_M · Vision",
+            hardware: "MacBook Pro M5 Pro · 48 GB",
+            summary: "Dense 27B with image input; about 20 GB with the projector and a 64K context",
+            profile: ServerProfile(name: "Qwen3.8 27B · M5 Pro 48 GB", modelPath: "~/ai-models/Qwen3.8-27B-Q4_K_M.gguf", alias: "qwen3.8-27b-q4", contextSize: 65536, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 4096, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "ggml-org/Qwen3.8-27B-GGUF",
+            useCases: [.coding, .chat, .visionChat],
+            mmprojFilename: "mmproj-Qwen3.8-27B-Q8_0.gguf"
+        ),
+        ProfilePreset(
+            id: "gguf-qwen38-27b-q4-32",
+            title: "Qwen3.8 27B · Q4_K_M · Vision",
+            hardware: "MacBook Air / Pro M5 · 32 GB",
+            summary: "Dense 27B with image input squeezed into 32 GB; about 20 GB with the projector, so the context stays at 16K",
+            profile: ServerProfile(name: "Qwen3.8 27B · M5 32 GB", modelPath: "~/ai-models/Qwen3.8-27B-Q4_K_M.gguf", alias: "qwen3.8-27b-q4-32", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "auto", reasoningBudget: 512, reasoningFormat: "deepseek", reasoningPreserve: true),
+            ggufSourceModelID: "ggml-org/Qwen3.8-27B-GGUF",
+            useCases: [.coding, .chat, .visionChat],
+            mmprojFilename: "mmproj-Qwen3.8-27B-Q8_0.gguf"
+        ),
+        ProfilePreset(
+            id: "mlx-qwen38-27b-4bit-32",
+            title: "Qwen3.8 27B · MLX 4-bit",
+            hardware: "MacBook Air / Pro M5 · 32 GB",
+            summary: "Native Apple MLX runtime; about 16 GB of weights with a 32K context",
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · Qwen3.8 27B 4-bit · M5 32 GB", executable: "mlx_lm.server", modelPath: "mlx-community/Qwen3.8-27B-4bit", alias: "qwen3.8-27b-mlx-4bit", contextSize: 32768, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat]
+        ),
+        ProfilePreset(
+            id: "mlx-gpt-oss-120b-m5max-128",
+            title: "GPT-OSS 120B · MXFP4 Q4",
+            hardware: "MacBook Pro M5 Max · 128 GB",
+            summary: "Large open-weight MoE with strong tool calling; about 62 GB of MLX weights with a 64K context",
+            profile: ServerProfile(backend: .mlxLM, name: "MLX · GPT-OSS 120B · M5 Max 128 GB", executable: "mlx_lm.server", modelPath: "mlx-community/gpt-oss-120b-MXFP4-Q4", alias: "gpt-oss-120b", contextSize: 65536, parallel: 1, flashAttention: false, jinja: false, cacheRAM: 10, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            useCases: [.coding, .chat, .systems, .homeAutomation]
         )
     ]
 }
@@ -1664,10 +1783,10 @@ struct ModelCategory: Identifiable, Hashable {
         .init(id: "language-\(code)", title: title, icon: "globe", tag: code)
     }
 
-    static let recommendedCoding = Self(id: "recommended-coding", title: "Recommended for Coding", icon: "chevron.left.forwardslash.chevron.right", recommendedFamilies: ["Qwen Coder", "DeepSeek Coder", "Codestral", "StarCoder", "Granite Code"], recommendedModelIDs: ["Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", "ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-235B-A22B-4bit"])
-    static let recommendedChat = Self(id: "recommended-chat", title: "Recommended for Prompted Chat", icon: "bubble.left.and.bubble.right.fill", recommendedFamilies: ["Qwen Instruct", "Llama Instruct", "Mistral Instruct", "Gemma it", "Phi"], recommendedModelIDs: ["ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8"])
-    static let recommendedSystems = Self(id: "recommended-systems", title: "Recommended for Systems Management", icon: "server.rack", recommendedFamilies: ["Qwen Coder", "Granite Code", "DeepSeek Coder", "Command R"], recommendedModelIDs: ["DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8"])
-    static let recommendedHomeAutomation = Self(id: "recommended-home-automation", title: "Recommended for Home Automation", icon: "house.and.flag.fill", recommendedFamilies: [], recommendedModelIDs: ["mlx-community/Qwen3-4B-4bit", "mlx-community/Qwen3.5-9B-MLX-4bit", "mlx-community/Qwen3-VL-8B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF"])
+    static let recommendedCoding = Self(id: "recommended-coding", title: "Recommended for Coding", icon: "chevron.left.forwardslash.chevron.right", recommendedFamilies: ["Qwen Coder", "DeepSeek Coder", "Codestral", "StarCoder", "Granite Code"], recommendedModelIDs: ["Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", "ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-235B-A22B-4bit", "ggml-org/Qwen3.8-27B-GGUF", "lmstudio-community/Qwen3.8-27B-MLX-8bit", "mlx-community/Qwen3.8-27B-4bit", "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "mlx-community/gpt-oss-120b-MXFP4-Q4"])
+    static let recommendedChat = Self(id: "recommended-chat", title: "Recommended for Prompted Chat", icon: "bubble.left.and.bubble.right.fill", recommendedFamilies: ["Qwen Instruct", "Llama Instruct", "Mistral Instruct", "Gemma it", "Phi"], recommendedModelIDs: ["ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "ggml-org/Qwen3.8-27B-GGUF", "lmstudio-community/Qwen3.8-27B-MLX-8bit", "mlx-community/Qwen3.8-27B-4bit", "mlx-community/gpt-oss-120b-MXFP4-Q4"])
+    static let recommendedSystems = Self(id: "recommended-systems", title: "Recommended for Systems Management", icon: "server.rack", recommendedFamilies: ["Qwen Coder", "Granite Code", "DeepSeek Coder", "Command R"], recommendedModelIDs: ["DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "mlx-community/gpt-oss-120b-MXFP4-Q4"])
+    static let recommendedHomeAutomation = Self(id: "recommended-home-automation", title: "Recommended for Home Automation", icon: "house.and.flag.fill", recommendedFamilies: [], recommendedModelIDs: ["mlx-community/Qwen3-4B-4bit", "mlx-community/Qwen3.5-9B-MLX-4bit", "mlx-community/Qwen3-VL-8B-Instruct-4bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", "mlx-community/gpt-oss-120b-MXFP4-Q4"])
     /// Chat models that can also read an attached image -- i.e. ones
     /// llama.cpp can serve with a matching mmproj projector (see
     /// MultimodalProjector), or an MLX build mlx-vlm actually loads.
@@ -1688,8 +1807,8 @@ struct ModelCategory: Identifiable, Hashable {
     /// The hand-picked recommendedModelIDs above are exempt from this
     /// (they're already confirmed vision+text), so this only tightens
     /// what else surfaces alongside them.
-    static let recommendedVisionChat = Self(id: "recommended-vision-chat", title: "Chat with Images", icon: "photo.on.rectangle.angled", pipelineTag: "image-text-to-text", recommendedFamilies: ["Qwen VL Instruct"], recommendedModelIDs: ["Qwen/Qwen3-VL-8B-Instruct-GGUF", "Qwen/Qwen3-VL-32B-Instruct-GGUF", "mlx-community/Qwen3-VL-8B-Instruct-4bit"])
-    static let recommendedAppleSilicon = Self(id: "recommended-apple-silicon", title: "Recommended for Apple Silicon", icon: "apple.logo", recommendedFamilies: ["Qwen Instruct", "Llama Instruct", "Mistral Instruct", "Gemma it", "Phi"], recommendedModelIDs: ["Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", "ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Qwen3-4B-4bit", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-6bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-235B-A22B-4bit"])
+    static let recommendedVisionChat = Self(id: "recommended-vision-chat", title: "Chat with Images", icon: "photo.on.rectangle.angled", pipelineTag: "image-text-to-text", recommendedFamilies: ["Qwen VL Instruct"], recommendedModelIDs: ["Qwen/Qwen3-VL-8B-Instruct-GGUF", "Qwen/Qwen3-VL-32B-Instruct-GGUF", "mlx-community/Qwen3-VL-8B-Instruct-4bit", "ggml-org/Qwen3.8-27B-GGUF"])
+    static let recommendedAppleSilicon = Self(id: "recommended-apple-silicon", title: "Recommended for Apple Silicon", icon: "apple.logo", recommendedFamilies: ["Qwen Instruct", "Llama Instruct", "Mistral Instruct", "Gemma it", "Phi"], recommendedModelIDs: ["Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", "ggml-org/Qwen3.6-27B-GGUF", "DhruvalLabs/GLM-4.7-Flash-GGUF", "mlx-community/Qwen3-4B-4bit", "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", "mlx-community/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3.6-35B-A3B-6bit", "mlx-community/Qwen3.6-35B-A3B-8bit", "mlx-community/gpt-oss-20b-MXFP4-Q4", "mlx-community/gpt-oss-20b-MXFP4-Q8", "mlx-community/Qwen3-235B-A22B-4bit", "ggml-org/Qwen3.8-27B-GGUF", "lmstudio-community/Qwen3.8-27B-MLX-8bit", "mlx-community/Qwen3.8-27B-4bit", "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "mlx-community/gpt-oss-120b-MXFP4-Q4"])
     static let all = Self(id: "all", title: "All", icon: "square.grid.2x2")
     static let trending = Self(id: "trending", title: "Trending", icon: "flame", sort: "trendingScore")
     static let mostDownloaded = Self(id: "downloads", title: "Most downloaded", icon: "arrow.down.circle")

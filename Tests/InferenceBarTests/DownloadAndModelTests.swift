@@ -872,6 +872,91 @@ final class DownloadAndModelTests: XCTestCase {
         }
     }
 
+    func testM5MacBookPresetsExistWithConfirmedSourcesAndSensibleTiers() {
+        let expectations: [(id: String, hardware: String, minimumGB: Int, source: String?, filename: String?)] = [
+            ("gguf-qwen38-27b-q8-m5max-64", "MacBook Pro M5 Max · 64 GB", 64, "ggml-org/Qwen3.8-27B-GGUF", "Qwen3.8-27B-Q8_0.gguf"),
+            ("gguf-qwen36-35b-q8-m5max-64", "MacBook Pro M5 Max · 64 GB", 64, "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF", "Qwen_Qwen3.6-35B-A3B-Q8_0.gguf"),
+            ("mlx-qwen38-27b-8bit-m5max-64", "MacBook Pro M5 Max · 64 GB", 64, "lmstudio-community/Qwen3.8-27B-MLX-8bit", nil),
+            ("gguf-qwen38-27b-q4-m5pro-48", "MacBook Pro M5 Pro · 48 GB", 48, "ggml-org/Qwen3.8-27B-GGUF", "Qwen3.8-27B-Q4_K_M.gguf"),
+            ("gguf-qwen38-27b-q4-32", "MacBook Air / Pro M5 · 32 GB", 32, "ggml-org/Qwen3.8-27B-GGUF", "Qwen3.8-27B-Q4_K_M.gguf"),
+            ("mlx-qwen38-27b-4bit-32", "MacBook Air / Pro M5 · 32 GB", 32, "mlx-community/Qwen3.8-27B-4bit", nil),
+            ("mlx-gpt-oss-120b-m5max-128", "MacBook Pro M5 Max · 128 GB", 128, "mlx-community/gpt-oss-120b-MXFP4-Q4", nil),
+            ("gguf-qwen3-coder-30b-q8-m5max-64", "MacBook Pro M5 Max · 64 GB", 64, "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf"),
+            ("mlx-qwen3-coder-30b-8bit-m5max-64", "MacBook Pro M5 Max · 64 GB", 64, "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit", nil),
+            ("gguf-qwen3-coder-30b-q4-m5pro-48", "MacBook Pro M5 Pro · 48 GB", 48, "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"),
+            ("gguf-qwen3-coder-30b-q4-32", "MacBook Air / Pro M5 · 32 GB", 32, "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"),
+        ]
+        for expectation in expectations {
+            let preset = ProfilePreset.all.first { $0.id == expectation.id }
+            XCTAssertNotNil(preset, "missing preset \(expectation.id)")
+            XCTAssertEqual(preset?.hardware, expectation.hardware)
+            XCTAssertEqual(preset?.minimumUnifiedMemoryGB, expectation.minimumGB)
+            XCTAssertEqual(preset?.downloadSourceModelID, expectation.source, "wrong source for \(expectation.id)")
+            XCTAssertEqual(preset?.expectedGGUFFilename, expectation.filename, "wrong filename for \(expectation.id)")
+        }
+        // A 64 GB M5 Max sees its own tier and everything smaller, but
+        // not the 128 GB one.
+        let at64 = ProfilePreset.all.filter { $0.hardware.contains("M5 Max") && $0.isSupported(physicalMemoryGB: 64) }
+        XCTAssertEqual(Set(at64.map(\.id)), ["gguf-qwen38-27b-q8-m5max-64", "gguf-qwen36-35b-q8-m5max-64", "mlx-qwen38-27b-8bit-m5max-64", "gguf-qwen3-coder-30b-q8-m5max-64", "mlx-qwen3-coder-30b-8bit-m5max-64"])
+    }
+
+    func testEveryVisionPresetsProjectorPairsWithItsOwnModelAndNoOtherFamily() {
+        // Pins down MultimodalProjector's family matching against every
+        // real preset at once, not just one hand-picked pair: each
+        // llama.cpp vision preset's own projector has to be accepted for
+        // its model file, and a different generation's projector (here
+        // Qwen3.6 vs Qwen3.8, which differ by a single token) has to be
+        // refused -- otherwise llama-server aborts on a tensor mismatch.
+        for preset in ProfilePreset.all where preset.profile.runtime == .llamaCPP {
+            guard let projector = preset.mmprojFilename, let model = preset.expectedGGUFFilename else { continue }
+            XCTAssertEqual(MultimodalProjector.projectorFilename(forModel: model, siblingFilenames: [projector]), projector, "\(preset.id): projector isn't paired with its own model")
+        }
+        XCTAssertNil(MultimodalProjector.projectorFilename(forModel: "Qwen3.6-27B-Q4_K_M.gguf", siblingFilenames: ["mmproj-Qwen3.8-27B-Q8_0.gguf"]))
+        XCTAssertNil(MultimodalProjector.projectorFilename(forModel: "Qwen3.8-27B-Q8_0.gguf", siblingFilenames: ["mmproj-Qwen3VL-32B-Instruct-F16.gguf"]))
+    }
+
+    func testPresetAliasesAreUniqueSoOpenCodeSyncCannotCollide() {
+        // OpenCodeConfigSync keys its model list by alias, so two
+        // different presets sharing one would overwrite each other there.
+        // (Pre-existing duplicates among older presets are left alone;
+        // this only guards the M5-generation additions.)
+        let m5Presets: Set<String> = [
+            "gguf-qwen38-27b-q8-m5max-64", "gguf-qwen36-35b-q8-m5max-64", "mlx-qwen38-27b-8bit-m5max-64",
+            "gguf-qwen38-27b-q4-m5pro-48", "gguf-qwen38-27b-q4-32", "mlx-qwen38-27b-4bit-32", "mlx-gpt-oss-120b-m5max-128",
+            "gguf-qwen3-coder-30b-q8-m5max-64", "mlx-qwen3-coder-30b-8bit-m5max-64", "gguf-qwen3-coder-30b-q4-m5pro-48", "gguf-qwen3-coder-30b-q4-32"
+        ]
+        let aliases = ProfilePreset.all.filter { m5Presets.contains($0.id) }.map(\.profile.alias)
+        XCTAssertEqual(aliases.count, m5Presets.count)
+        // The 48 GB and 32 GB Qwen3.8 Q4_K_M presets deliberately share
+        // one model file but must still differ in alias.
+        XCTAssertEqual(aliases.count, Set(aliases).count, "duplicate alias among the M5 presets: \(aliases)")
+    }
+
+    func testOpenCodeCodingPresetsRunToolCallingTemplatesAndFitTheirMemoryTier() {
+        // Weights + fp16 KV cache (48 layers x 4 KV heads x 128 dims x 2
+        // tensors x 2 bytes = 98,304 bytes/token) must stay inside the
+        // ~75% of unified memory macOS lets the GPU wire.
+        let tiers: [(id: String, weightsGB: Double, memoryGB: Double)] = [
+            ("gguf-qwen3-coder-30b-q8-m5max-64", 32.5, 64),
+            ("mlx-qwen3-coder-30b-8bit-m5max-64", 32.5, 64),
+            ("gguf-qwen3-coder-30b-q4-m5pro-48", 18.6, 48),
+            ("gguf-qwen3-coder-30b-q4-32", 18.6, 32),
+        ]
+        for tier in tiers {
+            guard let preset = ProfilePreset.all.first(where: { $0.id == tier.id }) else {
+                XCTFail("missing preset \(tier.id)")
+                continue
+            }
+            XCTAssertTrue(preset.useCases.contains(.coding), "\(tier.id) should be a coding preset")
+            if preset.profile.runtime == .llamaCPP {
+                XCTAssertTrue(preset.profile.jinja, "\(tier.id) needs --jinja for the tool-call template")
+                XCTAssertTrue(preset.profile.flashAttention)
+            }
+            let kvGB = Double(preset.profile.contextSize) * 98_304 / 1_073_741_824
+            XCTAssertLessThan(tier.weightsGB + kvGB, tier.memoryGB * 0.75, "\(tier.id) would exceed the GPU wired-memory ceiling")
+        }
+    }
+
     func testPresetUseCaseTitlesAndIconsAreDistinct() {
         // Every case needs its own label and symbol -- a collision would
         // make two categories indistinguishable in the "Add preset" menu.
