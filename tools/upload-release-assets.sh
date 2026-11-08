@@ -248,7 +248,11 @@ esac
 # A GitHub release asset attaches to a numeric release ID, not to the tag
 # name directly -- fetched from the existing release, or from the one just
 # created.
+# A GitHub problem here (bad token, no access, outage) must not stop the
+# GitLab upload below: it is recorded, GitHub is skipped, and the run still
+# ends non-zero so the failure is not missed.
 GH_RELEASE_ID=""
+GH_SKIPPED=""
 if [ -n "$GITHUB" ]; then
   result="$(gh_api_call GET "$GITHUB_API/repos/$GITHUB/releases/tags/$(url_encode "$TAG")")"
   status="${result%%$'\t'*}"; body="${result#*$'\t'}"
@@ -264,22 +268,30 @@ if [ -n "$GITHUB" ]; then
         result="$(gh_api_call POST "$GITHUB_API/repos/$GITHUB/releases" \
                     --header "Content-Type: application/json" --data "$payload")"
         status="${result%%$'\t'*}"; body="${result#*$'\t'}"
-        [ "$status" = "201" ] || die "creating github release $TAG failed ($status): $(printf '%s' "$body" | head -c 200)"
-        GH_RELEASE_ID="$(printf '%s' "$body" | json_get id)"
-        log "created github release $TAG"
+        if [ "$status" = "201" ]; then
+          GH_RELEASE_ID="$(printf '%s' "$body" | json_get id)"
+          log "created github release $TAG"
+        else
+          GH_SKIPPED="creating the github release failed ($status): $(printf '%s' "$body" | head -c 200)"
+        fi
       fi
       ;;
     *)
-      die "checking github release $TAG failed ($status): $(printf '%s' "$body" | head -c 200)"
+      GH_SKIPPED="checking the github release failed ($status): $(printf '%s' "$body" | head -c 200)"
       ;;
   esac
+  if [ -n "$GH_SKIPPED" ]; then
+    warn "github skipped -- $GH_SKIPPED"
+    [ "$status" = "401" ] && warn "401 means GitHub rejected GITHUB_TOKEN itself (expired, mistyped, or revoked)"
+    warn "continuing with gitlab; re-run later to add the github assets"
+  fi
 fi
 
 if [ "$DRY" = "1" ]; then
   log ""
   printf '%s' "$files" | while IFS= read -r file; do
     if [ -n "$file" ]; then
-      if [ -n "$GITHUB" ]; then
+      if [ -n "$GITHUB" ] && [ -z "$GH_SKIPPED" ]; then
         log "  would upload and link: $(basename "$file")  (gitlab + github)"
       else
         log "  would upload and link: $(basename "$file")"
@@ -324,7 +336,7 @@ while IFS= read -r file; do
     fi
   fi
 
-  if [ -n "$GITHUB" ]; then
+  if [ -n "$GITHUB" ] && [ -z "$GH_SKIPPED" ]; then
     gh_url="$GITHUB_UPLOADS/repos/$GITHUB/releases/$GH_RELEASE_ID/assets?name=$(url_encode "$name")"
     result="$(gh_api_call POST "$gh_url" --header "Content-Type: application/octet-stream" --data-binary "@$file")"
     status="${result%%$'\t'*}"; body="${result#*$'\t'}"
@@ -346,6 +358,13 @@ done <<< "$files"
 
 log ""
 log "gitlab: uploaded $uploaded, failed $failed"
-[ -n "$GITHUB" ] && log "github: uploaded $gh_uploaded, failed $gh_failed"
+if [ -n "$GITHUB" ]; then
+  if [ -n "$GH_SKIPPED" ]; then
+    log "github: SKIPPED ($GH_SKIPPED)"
+  else
+    log "github: uploaded $gh_uploaded, failed $gh_failed"
+  fi
+fi
 total_failed=$((failed + gh_failed))
+[ -z "$GH_SKIPPED" ] || total_failed=$((total_failed + 1))
 [ "$total_failed" -eq 0 ]

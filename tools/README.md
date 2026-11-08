@@ -78,7 +78,9 @@ In order, `release-all`:
    anything is wrong: the tag disagrees with the app version, `CHANGELOG.md` has
    no section for it, the tree has uncommitted changes, HEAD isn't on every git
    remote, `NOTARY_PROFILE` is unset (a non-notarized build trips Gatekeeper for
-   every downloader; `ALLOW_UNNOTARIZED=1` overrides), a token is missing, or
+   every downloader; `ALLOW_UNNOTARIZED=1` overrides), there is no Developer ID
+   certificate, a token is missing, **a token is rejected by its host** (one
+   read-only request each; `PREFLIGHT_OFFLINE=1` skips them), or
    `tools/release.env` isn't filled in. Every problem is listed, not just the first.
 2. **`tools/check.sh --no-build`** — layout and privacy suites.
 3. **`make macos-package`** — the signed, notarized, stapled DMG.
@@ -102,13 +104,21 @@ tools/upload-release-assets.sh --tag v0.7.1 --ref main --dir some/dir --dry-run
 ```
 
 `release-upload` copies only `outputs/InferenceBar-<version>-macos.*` into
-`work/release/` first. `outputs/` keeps older releases around, and uploading the
+`work/release/` first. `outputs/` is gitignored, so a fresh clone or an
+extracted archive does not have your built files; add `KEEP_DIR=<folder>` (outside
+the checkout) to `make release-all` and a copy of each release's files is kept in
+`<folder>/<version>/`, which `release-upload` falls back to when `outputs/` is empty. `outputs/` keeps older releases around, and uploading the
 whole directory would attach them to the new Release.
 
 With `release.env` filled in, `--host`, `--project` and `--github` are optional
 on the script; a flag always wins over the file. For a Release whose tag doesn't
 exist on the remote yet, `--ref` (a branch or commit) is required — GitLab
 otherwise answers `422 Ref is not specified`.
+
+GitLab is always done first, and a GitHub problem (rejected token, no access,
+outage) is reported and GitHub skipped instead of stopping the run: the
+GitLab files still go up, the summary says `github: SKIPPED (...)`, and the
+exit status is still non-zero. Re-run later to add the GitHub assets.
 
 The script uploads each file to GitLab's generic package registry, then attaches
 it as an asset link on the Release so it appears under the Release's Assets list.

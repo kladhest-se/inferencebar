@@ -37,7 +37,7 @@ APP_DEST ?= /Applications
 # every invocation picks it up without repeating it.
 NOTARY_PROFILE ?=
 
-.PHONY: all help clean macos-build macos-run macos-open macos-test macos-archive macos-app macos-install macos-release macos-package signing-identities notarize-help notarize-setup cli install-cli check tools-test release-preflight release-stage release-upload release-all
+.PHONY: all help clean macos-build macos-run macos-open macos-test macos-archive macos-app macos-install macos-release macos-package signing-identities notarize-help notarize-setup cli install-cli check tools-test release-preflight release-stage release-keep release-upload release-all
 
 all:
 	$(CACHE_ENV) swift build -c release $(SWIFT_FLAGS)
@@ -266,11 +266,37 @@ release-preflight:
 
 # Only THIS version's artifacts. outputs/ keeps older releases around, and
 # uploading the whole directory would attach 0.6's files to 0.7's Release.
+#
+# outputs/ is gitignored, so it is NOT in a clone or an extracted archive.
+# KEEP_DIR=<folder> (outside this checkout) keeps a copy of each release's
+# files at <folder>/<version>/ after `make release-all` builds them, and
+# release-stage falls back to that copy when outputs/ has none.
+KEEP_DIR ?=
+RELEASE_FILES := InferenceBar-$(VERSION)-macos.*
+
 release-stage:
 	rm -rf "$(RELEASE_STAGE)"
 	mkdir -p "$(RELEASE_STAGE)"
-	@ls outputs/InferenceBar-$(VERSION)-macos.* >/dev/null 2>&1 || { echo "error: no outputs/InferenceBar-$(VERSION)-macos.* -- run 'make macos-package' first"; exit 1; }
-	cp outputs/InferenceBar-$(VERSION)-macos.* "$(RELEASE_STAGE)/"
+	@src=outputs; \
+	if ! ls $$src/$(RELEASE_FILES) >/dev/null 2>&1; then \
+	  if [ -n "$(KEEP_DIR)" ] && ls "$(KEEP_DIR)/$(VERSION)"/$(RELEASE_FILES) >/dev/null 2>&1; then \
+	    src="$(KEEP_DIR)/$(VERSION)"; echo "outputs/ has no $(VERSION) files; using the kept copy in $$src"; \
+	  else \
+	    echo "error: no outputs/$(RELEASE_FILES) in this folder."; \
+	  echo "  outputs/ is not stored in git, so a fresh clone or an extracted archive never has it."; \
+	  echo "  - built in another folder? copy that folder's outputs/$(RELEASE_FILES) here"; \
+	  echo "  - otherwise build them:  make macos-package NOTARY_PROFILE=<profile>  (and macos-release)"; \
+	    echo "  - to keep copies safe from now on: make release-all KEEP_DIR=~/InferenceBar-releases"; \
+	    exit 1; \
+	  fi; \
+	fi; \
+	cp $$src/$(RELEASE_FILES) "$(RELEASE_STAGE)/"
+
+# Copies this version's files to KEEP_DIR/<version>/ (a no-op without KEEP_DIR).
+release-keep:
+	@if [ -n "$(KEEP_DIR)" ]; then \
+	  mkdir -p "$(KEEP_DIR)/$(VERSION)" && cp outputs/$(RELEASE_FILES) "$(KEEP_DIR)/$(VERSION)/" && echo "Kept a copy of the $(VERSION) files in $(KEEP_DIR)/$(VERSION)"; \
+	fi
 
 release-upload: release-stage
 	tools/upload-release-assets.sh --tag "$(TAG)" $(if $(REF),--ref "$(REF)") $(if $(DRY),--dry-run) $(if $(GITLAB_ONLY),--no-github) --dir "$(RELEASE_STAGE)"
@@ -282,4 +308,5 @@ release-all: release-preflight
 	tools/check.sh --no-build
 	$(MAKE) macos-package
 	@if [ "$(ZIP)" != "0" ]; then $(MAKE) macos-release; fi
+	$(MAKE) release-keep
 	$(MAKE) release-upload
