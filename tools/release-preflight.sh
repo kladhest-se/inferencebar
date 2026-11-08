@@ -97,6 +97,34 @@ else
   bad "NOTARY_PROFILE is not set -- the build would not be notarized and Gatekeeper would warn every downloader (see 'make notarize-help'; ALLOW_UNNOTARIZED=1 overrides)"
 fi
 
+# --- Signing identity ------------------------------------------------------------
+# macos-package signs with ad-hoc ("-") when no Developer ID Application
+# certificate is in the keychain, and Apple rejects an ad-hoc build at
+# notarization -- after the ten-minute build. Notarization also needs the
+# credentials saved by `make notarize-setup`.
+if [ "$(uname -s)" = "Darwin" ]; then
+  identity="${CODESIGN_IDENTITY:-}"
+  if [ -z "$identity" ] || [ "$identity" = "-" ]; then
+    if [ "${ALLOW_UNNOTARIZED:-0}" = "1" ]; then
+      warn "no Developer ID Application certificate: the build will be ad-hoc signed"
+    else
+      bad "no 'Developer ID Application' certificate in the keychain, so the build would be ad-hoc signed and Apple would reject it (see 'make signing-identities'; ALLOW_UNNOTARIZED=1 overrides)"
+    fi
+  else
+    ok "signing with a Developer ID Application certificate"
+  fi
+  if [ -n "${NOTARY_PROFILE:-}" ]; then
+    # Where notarytool keeps a saved profile. Looked up locally, no network.
+    if security find-generic-password -s "com.apple.gke.notary.tool.saved-creds.$NOTARY_PROFILE" >/dev/null 2>&1; then
+      ok "notarytool credentials '$NOTARY_PROFILE' are in the keychain"
+    else
+      # A warning, not a failure: the keychain item name is notarytool's
+      # own and can differ between Xcode versions.
+      warn "could not find notarytool credentials '$NOTARY_PROFILE' in the keychain; if notarization says 'No Keychain password item', run: make notarize-setup NOTARY_PROFILE=$NOTARY_PROFILE"
+    fi
+  fi
+fi
+
 # --- Where it is going ---------------------------------------------------------------
 local_config_refuse_secrets || problems=$((problems + 1))
 host="$(local_config_get GITLAB_HOST)"; project="$(local_config_get GITLAB_PROJECT)"; github="$(local_config_get GITHUB_REPO)"

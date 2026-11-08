@@ -262,7 +262,7 @@ tools-test:
 	bash tools/checks/run.sh
 
 release-preflight:
-	@TAG="$(TAG)" VERSION="$(VERSION)" NOTARY_PROFILE="$(NOTARY_PROFILE)" tools/release-preflight.sh
+	@TAG="$(TAG)" VERSION="$(VERSION)" NOTARY_PROFILE="$(NOTARY_PROFILE)" CODESIGN_IDENTITY="$(CODESIGN_IDENTITY)" tools/release-preflight.sh
 
 # Only THIS version's artifacts. outputs/ keeps older releases around, and
 # uploading the whole directory would attach 0.6's files to 0.7's Release.
