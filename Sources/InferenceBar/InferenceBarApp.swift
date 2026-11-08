@@ -53,10 +53,37 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
     private var hotkeySettingObserver: NSObjectProtocol?
     private var globalHotkeyMonitor: Any?
     private var localHotkeyMonitor: Any?
+    private var strayWindowObserver: NSObjectProtocol?
+
+    override init() {
+        // Every real window is owned by this delegate (see makeWindow), so
+        // there is nothing for AppKit/SwiftUI to restore. Left on, newer
+        // macOS releases bring back the placeholder Settings scene's empty
+        // window at launch.
+        UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": false])
+        super.init()
+    }
+
+    // The App's `Settings { EmptyView() }` scene exists only because App
+    // needs a Scene; its window is blank and must never be on screen.
+    // The real settings window is `settingsWindow` (titled "Settings").
+    private func closePlaceholderSettingsWindows() {
+        for window in NSApp.windows where window !== settingsWindow {
+            let identifier = window.identifier?.rawValue ?? ""
+            if identifier.contains("SwiftUI_Settings") || window.title.hasSuffix(" Settings") {
+                window.close()
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
+        closePlaceholderSettingsWindows()
+        DispatchQueue.main.async { [weak self] in self?.closePlaceholderSettingsWindows() }
+        strayWindowObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.closePlaceholderSettingsWindows() }
+        }
         lifecycleObserver = NotificationCenter.default.addObserver(forName: .inferenceServerLifecycleChanged, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.updateStatusIcon() }
         }
@@ -80,6 +107,7 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
         store.stopUpdateMonitoring()
         if let lifecycleObserver { NotificationCenter.default.removeObserver(lifecycleObserver) }
         if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
+        if let strayWindowObserver { NotificationCenter.default.removeObserver(strayWindowObserver) }
         if let appearanceObserver { NotificationCenter.default.removeObserver(appearanceObserver) }
         if let hotkeySettingObserver { NotificationCenter.default.removeObserver(hotkeySettingObserver) }
         removeHotkeyMonitors()
