@@ -957,6 +957,25 @@ final class DownloadAndModelTests: XCTestCase {
         }
     }
 
+    func testMenuBarIconNeverDrawsOutsideItsCanvas() {
+        // The menu bar clips anything outside the image, which is how the
+        // status dot got sliced off at the right and bottom edges: its
+        // cut-out ring reached x=25.25 and y=-1.25 on a 24x18 canvas.
+        let canvas = NSRect(origin: .zero, size: StatusIconGeometry.size)
+        let badges: [(name: String, dot: NSRect)] = [
+            ("status", StatusIconGeometry.statusDot),
+            ("update", StatusIconGeometry.updateDot),
+        ]
+        for badge in badges {
+            let ring = StatusIconGeometry.ring(around: badge.dot)
+            XCTAssertTrue(canvas.contains(ring), "\(badge.name) badge's ring \(ring) leaves the \(canvas) canvas")
+        }
+        XCTAssertTrue(canvas.contains(StatusIconGeometry.bubble))
+        XCTAssertTrue(StatusIconGeometry.bubble.contains(StatusIconGeometry.bolt))
+        // The update badge has its own corner; it must not cover the status dot.
+        XCTAssertFalse(StatusIconGeometry.statusDot.intersects(StatusIconGeometry.updateDot))
+    }
+
     func testPresetUseCaseTitlesAndIconsAreDistinct() {
         // Every case needs its own label and symbol -- a collision would
         // make two categories indistinguishable in the "Add preset" menu.

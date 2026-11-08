@@ -199,29 +199,50 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
     }
 
     private func statusImage(dotColor: NSColor, description: String) -> NSImage {
-        let size = NSSize(width: 24, height: 18)
-        let image = NSImage(size: size, flipped: false) { _ in
+        let image = NSImage(size: StatusIconGeometry.size, flipped: false) { _ in
             let markColor: NSColor = switch self.store.menuBarIconStyle {
             case .matchSystem: .labelColor
             case .colour: self.store.appTheme.nsAccent
             case .monochrome: .white
             }
+
+            // Symbols are drawn aspect-fit: NSImage.draw(in:) stretches to
+            // fill the rect, which squashed the bubble slightly.
+            func draw(_ symbol: NSImage?, fitting rect: NSRect) {
+                guard let symbol, symbol.size.width > 0, symbol.size.height > 0 else { return }
+                let scale = min(rect.width / symbol.size.width, rect.height / symbol.size.height)
+                let fitted = NSSize(width: symbol.size.width * scale, height: symbol.size.height * scale)
+                symbol.draw(in: NSRect(x: rect.midX - fitted.width / 2, y: rect.midY - fitted.height / 2, width: fitted.width, height: fitted.height))
+            }
+
+            // A dot with a transparent ring cut out around it, so it stays
+            // legible over the bubble on any menu-bar colour. (It used to be
+            // ringed with controlBackgroundColor, which showed up as a dark
+            // halo on a coloured menu bar.)
+            func drawBadge(_ rect: NSRect, color: NSColor) {
+                if let context = NSGraphicsContext.current {
+                    context.saveGraphicsState()
+                    context.compositingOperation = .clear
+                    NSBezierPath(ovalIn: StatusIconGeometry.ring(around: rect)).fill()
+                    context.restoreGraphicsState()
+                }
+                color.setFill()
+                NSBezierPath(ovalIn: rect).fill()
+            }
+
             let bubble = NSImage(systemSymbolName: "bubble.left.fill", accessibilityDescription: description)?
                 .withSymbolConfiguration(.init(pointSize: 17, weight: .semibold).applying(.init(paletteColors: [markColor])))
-            bubble?.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18))
+            draw(bubble, fitting: StatusIconGeometry.bubble)
             let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: description)?
                 .withSymbolConfiguration(.init(pointSize: 9, weight: .bold).applying(.init(paletteColors: [self.store.menuBarIconStyle == .colour ? .white : NSColor.windowBackgroundColor])))
-            bolt?.draw(in: NSRect(x: 5, y: 4, width: 8, height: 10))
+            draw(bolt, fitting: StatusIconGeometry.bolt)
 
-            let badgeRect = NSRect(x: 16, y: 0, width: 8, height: 8)
-            NSColor.controlBackgroundColor.setFill()
-            NSBezierPath(ovalIn: badgeRect.insetBy(dx: -1.25, dy: -1.25)).fill()
-            dotColor.setFill()
-            NSBezierPath(ovalIn: badgeRect).fill()
+            drawBadge(StatusIconGeometry.statusDot, color: dotColor)
             if self.store.availableUpdateTag != nil {
-                let update = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "InferenceBar update available")?
-                    .withSymbolConfiguration(.init(pointSize: 9, weight: .bold).applying(.init(paletteColors: [.systemOrange, .white])))
-                update?.draw(in: NSRect(x: 14, y: -1, width: 11, height: 11))
+                drawBadge(StatusIconGeometry.updateDot, color: .systemOrange)
+                let arrow = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: "InferenceBar update available")?
+                    .withSymbolConfiguration(.init(pointSize: 5, weight: .heavy).applying(.init(paletteColors: [.white])))
+                draw(arrow, fitting: StatusIconGeometry.updateDot.insetBy(dx: 1.5, dy: 1.5))
             }
             return true
         }

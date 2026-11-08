@@ -1,6 +1,28 @@
 import AppKit
 import SwiftUI
 
+/// Where each piece of the menu-bar icon is drawn, in points, on a canvas of
+/// `size`. Kept separate from the drawing code so a test can assert the one
+/// thing that has already gone wrong once: anything drawn outside the canvas
+/// -- a badge's cut-out ring included -- is clipped by the menu bar, which
+/// showed as the status dot being sliced off at the right and bottom edges.
+enum StatusIconGeometry {
+    static let size = NSSize(width: 24, height: 18)
+    static let bubble = NSRect(x: 0, y: 0, width: 18, height: 18)
+    static let bolt = NSRect(x: 5, y: 4, width: 8, height: 10)
+    /// Server state, bottom right.
+    static let statusDot = NSRect(x: 15.5, y: 1.25, width: 7, height: 7)
+    /// "Update available", top right -- its own corner, so it no longer
+    /// covers the status dot.
+    static let updateDot = NSRect(x: 15.5, y: 9.75, width: 7, height: 7)
+    static let ringWidth: CGFloat = 1.25
+
+    /// The transparent ring cut out around a dot so it reads against the bubble.
+    static func ring(around dot: NSRect) -> NSRect {
+        dot.insetBy(dx: -ringWidth, dy: -ringWidth)
+    }
+}
+
 enum AppTheme: String, CaseIterable, Identifiable {
     case system = "System"
     case light = "Light"
