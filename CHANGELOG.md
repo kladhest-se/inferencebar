@@ -1,10 +1,13 @@
 # Changelog
 
-## 0.6
+## 0.7
 
 - Fixed: empty "InferenceBar Settings" window appearing at launch
 - Added M5 MacBook presets: Qwen3.8 27B (vision), Qwen 3.6 35B Q8, GPT-OSS 120B
 - Added OpenCode coding presets: Qwen3 Coder 30B (32–64 GB, up to 128K context)
+
+## 0.6
+
 - OpenCode: default coding profile picker
 - Chat window: Session stats popover
 - Profile editor/Model Store: removed pause/cancel (Downloads window only)
