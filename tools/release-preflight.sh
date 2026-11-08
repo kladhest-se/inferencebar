@@ -80,7 +80,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       if git branch -r --contains "$head_sha" 2>/dev/null | grep -qE "^[[:space:]]*$remote/"; then
         ok "HEAD is on remote '$remote'"
       else
-        bad "HEAD is not on remote '$remote' (as of your last fetch) -- git push $remote <branch> first"
+        bad "HEAD is not on remote '$remote' (as of your last fetch) -- run: git push $remote $(git rev-parse --abbrev-ref HEAD)"
       fi
     done
   fi
