@@ -1254,6 +1254,29 @@ struct ProfilePreset: Identifiable {
         return URL(fileURLWithPath: NSString(string: profile.modelPath).expandingTildeInPath).lastPathComponent
     }
 
+    /// Whether `other` is a profile created from this preset.
+    ///
+    /// A preset's `modelPath` is a template ("~/ai-models/x.gguf", or a
+    /// Hugging Face repo ID for MLX). Once the download finishes the app
+    /// rewrites the profile's path to where the file really is (an
+    /// absolute path, or the local snapshot folder for MLX), so comparing
+    /// the two strings stops matching exactly when the model becomes
+    /// usable. That is what made a downloaded coding profile invisible to
+    /// the OpenCode sync. GGUF presets are matched by file name
+    /// (case-insensitively) and MLX presets by their Hugging Face cache
+    /// folder name, `models--<org>--<name>`.
+    func matches(_ other: ServerProfile) -> Bool {
+        guard other.runtime == profile.runtime else { return false }
+        if other.modelPath == profile.modelPath { return true }
+        if profile.runtime.usesGGUF {
+            let expected = URL(fileURLWithPath: NSString(string: profile.modelPath).expandingTildeInPath).lastPathComponent
+            let actual = URL(fileURLWithPath: NSString(string: other.modelPath).expandingTildeInPath).lastPathComponent
+            return !expected.isEmpty && actual.caseInsensitiveCompare(expected) == .orderedSame
+        }
+        let cacheFolder = "models--" + profile.modelPath.replacingOccurrences(of: "/", with: "--")
+        return other.modelPath.split(separator: "/").contains { $0 == cacheFolder }
+    }
+
     func isAvailable(modelRoot: URL) -> Bool {
         let configured = NSString(string: profile.modelPath).expandingTildeInPath
         if profile.runtime.usesGGUF {

@@ -932,6 +932,32 @@ final class DownloadAndModelTests: XCTestCase {
         XCTAssertEqual(aliases.count, Set(aliases).count, "duplicate alias among the M5 presets: \(aliases)")
     }
 
+    func testPresetStillMatchesItsProfileAfterTheDownloadRewritesTheModelPath() throws {
+        // A finished download replaces "~/ai-models/x.gguf" with the real
+        // absolute path (and an MLX repo ID with its snapshot folder). The
+        // OpenCode sync and its picker used to compare the raw strings, so
+        // a downloaded coding profile was reported as "no coding profiles".
+        let gguf = try XCTUnwrap(ProfilePreset.all.first { $0.id == "gguf-qwen3-coder-30b-q8-m5max-64" })
+        var profile = gguf.profile
+        XCTAssertTrue(gguf.matches(profile), "a freshly added profile matches")
+        profile.modelPath = "/Users/alex/ai-models/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf"
+        XCTAssertTrue(gguf.matches(profile), "absolute path after the download")
+        profile.modelPath = "/Volumes/Models/qwen3-coder-30b-a3b-instruct-q8_0.GGUF"
+        XCTAssertTrue(gguf.matches(profile), "another model folder, different letter case")
+        profile.modelPath = "/Users/alex/ai-models/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+        XCTAssertFalse(gguf.matches(profile), "a different quantization is a different model")
+
+        let mlx = try XCTUnwrap(ProfilePreset.all.first { $0.id == "mlx-qwen3-coder-30b-8bit-m5max-64" })
+        var mlxProfile = mlx.profile
+        XCTAssertTrue(mlx.matches(mlxProfile))
+        let folder = "models--" + mlx.profile.modelPath.replacingOccurrences(of: "/", with: "--")
+        mlxProfile.modelPath = "/Users/alex/ai-models/\(folder)/snapshots/abc123"
+        XCTAssertTrue(mlx.matches(mlxProfile), "snapshot folder after the MLX download")
+        mlxProfile.modelPath = "/Users/alex/ai-models/models--mlx-community--Other-Model-8bit/snapshots/abc123"
+        XCTAssertFalse(mlx.matches(mlxProfile))
+        XCTAssertFalse(gguf.matches(mlxProfile), "the runtime must agree too")
+    }
+
     func testOpenCodeSyncNeverTreatsAnUnparseableConfigAsEmpty() throws {
         XCTAssertEqual(try OpenCodeConfigSync.parseExisting(nil).get().count, 0, "no file yet is an empty config")
         XCTAssertEqual(try OpenCodeConfigSync.parseExisting(Data("  \n".utf8)).get().count, 0, "a blank file is an empty config")

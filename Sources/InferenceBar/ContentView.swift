@@ -862,7 +862,7 @@ struct GlobalServerSettingsView: View {
     /// so the picker never offers a profile OpenCode wouldn't recognize.
     private var codingProfiles: [ServerProfile] {
         store.profiles.filter { profile in
-            ProfilePreset.all.contains { $0.profile.runtime == profile.runtime && $0.profile.modelPath == profile.modelPath && $0.useCases.contains(.coding) }
+            ProfilePreset.all.contains { $0.matches(profile) && $0.useCases.contains(.coding) }
         }
     }
 

@@ -772,7 +772,7 @@ final class AppStore {
     func addAllPresets() {
         for preset in ProfilePreset.all {
             guard preset.isSupported(physicalMemoryGB: currentUnifiedMemoryGB) else { continue }
-            if let existingOwnerID = profiles.first(where: { $0.runtime == preset.profile.runtime && $0.modelPath == preset.profile.modelPath })?.id {
+            if let existingOwnerID = profiles.first(where: { preset.matches($0) })?.id {
                 // Already added as a profile in an earlier run -- don't add
                 // it again, but a vision preset added before this app knew
                 // to fetch its mmproj file may still be missing one, so
@@ -820,9 +820,7 @@ final class AppStore {
         guard fileManager.fileExists(atPath: Self.openCodeConfigDirectory.path)
             || HomebrewRuntimeManager.isInstalled(.opencode, fileManager: fileManager) else { return .openCodeNotSetUp }
         let codingProfiles: [OpenCodeConfigSync.ProfileEntry] = profiles.compactMap { profile in
-            guard ProfilePreset.all.contains(where: {
-                $0.profile.runtime == profile.runtime && $0.profile.modelPath == profile.modelPath && $0.useCases.contains(.coding)
-            }) else { return nil }
+            guard ProfilePreset.all.contains(where: { $0.matches(profile) && $0.useCases.contains(.coding) }) else { return nil }
             return .init(alias: profile.alias, name: profile.name, contextSize: profile.contextSize, maximumOutputTokens: profile.effectiveMaximumOutputTokens)
         }
         guard !codingProfiles.isEmpty else { return .noCodingProfiles }
@@ -2208,7 +2206,7 @@ final class AppStore {
             errorMessage = "The running profile has no vision support — it can't be sent an image. Switch to a vision-capable model (one with a projector file) first."
             return
         }
-        if let preset = ProfilePreset.all.first(where: { $0.profile.runtime == profile.runtime && $0.profile.modelPath == profile.modelPath }),
+        if let preset = ProfilePreset.all.first(where: { $0.matches(profile) }),
            preset.mmprojFilename != nil {
             errorMessage = "This model's vision projector file isn't downloaded yet -- fetching it now. Check the Downloads window, then try attaching the image again once it finishes."
             enqueuePresetDownload(preset, ownerProfileID: profile.id)
