@@ -14,3 +14,12 @@ work/dmg/
 # Editors
 .vscode/
 .idea/
+
+# Machine-local release settings and anything credential-shaped. Tokens and
+# signing material must never be committed (tools/checks/privacy.sh checks).
+tools/release.env
+.env
+*.p12
+*.pem
+*.key
+*.mobileprovision

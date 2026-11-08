@@ -37,7 +37,7 @@ APP_DEST ?= /Applications
 # every invocation picks it up without repeating it.
 NOTARY_PROFILE ?=
 
-.PHONY: all help clean macos-build macos-run macos-open macos-test macos-archive macos-app macos-install macos-release macos-package signing-identities notarize-help notarize-setup cli install-cli
+.PHONY: all help clean macos-build macos-run macos-open macos-test macos-archive macos-app macos-install macos-release macos-package signing-identities notarize-help notarize-setup cli install-cli check tools-test release-upload
 
 all:
 	$(CACHE_ENV) swift build -c release $(SWIFT_FLAGS)
@@ -58,6 +58,9 @@ help:
 	@echo "  make signing-identities  List available signing identities"
 	@echo "  make notarize-help   Explain notarizing macos-package/macos-release for real"
 	@echo "  make notarize-setup  Find the team ID and Apple ID and set up notarization"
+	@echo "  make check           Pre-push checks: layout, no secrets in the tree, build"
+	@echo "  make tools-test      Run every check suite in tools/checks"
+	@echo "  make release-upload TAG=v0.7 [REF=main]  Attach outputs/ to that tag's Release"
 	@echo ""
 	@echo "  Signing identity : $(CODESIGN_IDENTITY)"
 	@echo "  Notary profile   : $(if $(NOTARY_PROFILE),$(NOTARY_PROFILE),(not set -- macos-package/macos-release will sign but not notarize))"
@@ -234,3 +237,16 @@ clean:
 # "missing required module 'SwiftShims'". `make clean` covers exactly this;
 # it's not a code problem, just a stale cache tied to wherever it was first
 # built.
+
+# Release tooling lives in tools/ -- see tools/README.md. None of it knows
+# where your GitLab is: that comes from tools/release.env, which is
+# gitignored, and tokens come from GITLAB_TOKEN / GITHUB_TOKEN.
+check:
+	tools/check.sh
+
+tools-test:
+	bash tools/checks/run.sh
+
+release-upload:
+	@test -n "$(TAG)" || { echo "usage: make release-upload TAG=v0.7 [REF=main]"; exit 1; }
+	tools/upload-release-assets.sh --tag "$(TAG)" $(if $(REF),--ref "$(REF)") --dir outputs/

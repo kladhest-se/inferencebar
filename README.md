@@ -55,7 +55,11 @@ make cli            # Build just the inference-cli command-line tool
 make install-cli    # Build the CLI and install it on your PATH as `inference`
 make help           # Show all available commands
 make clean          # Remove local build products
+make check          # Pre-push checks: layout, no secrets in the tree, build
 ```
+
+Release tooling (pre-push checks, attaching built files to a GitLab/GitHub
+Release) lives in [`tools/`](tools/README.md).
 
 Signing falls back to an ad-hoc signature only when no Developer ID Application
 identity is found in the keychain — if one is installed, it's picked up and used
