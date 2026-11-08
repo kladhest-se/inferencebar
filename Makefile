@@ -273,7 +273,7 @@ release-stage:
 	cp outputs/InferenceBar-$(VERSION)-macos.* "$(RELEASE_STAGE)/"
 
 release-upload: release-stage
-	tools/upload-release-assets.sh --tag "$(TAG)" $(if $(REF),--ref "$(REF)") $(if $(DRY),--dry-run) --dir "$(RELEASE_STAGE)"
+	tools/upload-release-assets.sh --tag "$(TAG)" $(if $(REF),--ref "$(REF)") $(if $(DRY),--dry-run) $(if $(GITLAB_ONLY),--no-github) --dir "$(RELEASE_STAGE)"
 
 # Preflight first, so a missing token or an unpushed commit fails in a second
 # rather than after the notarization wait. Does not push anything: the

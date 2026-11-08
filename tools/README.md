@@ -97,6 +97,7 @@ need to redo the upload:
 ```sh
 make release-preflight
 make release-upload TAG=v0.7 REF=main          # stages only this version's files
+make release-upload TAG=v0.7 REF=main GITLAB_ONLY=1   # skip GitHub (e.g. its token is being fixed)
 tools/upload-release-assets.sh --tag v0.7 --ref main --dir some/dir --dry-run
 ```
 

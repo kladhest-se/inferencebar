@@ -61,6 +61,7 @@
 # test. There is no equivalent GitLab override: --host already is one.
 #
 #   -n, --dry-run   say what would happen; nothing is uploaded or created
+#   --no-github     GitLab only, even when GITHUB_REPO is in tools/release.env
 #
 # Two things the naive version of this script (curl --upload-file in a
 # find loop, printing "Uploaded: $file" unconditionally) gets wrong,
@@ -85,6 +86,7 @@ set -euo pipefail
 HOST=""
 PROJECT=""
 GITHUB=""
+NO_GITHUB=0
 TAG=""
 REF=""
 PACKAGE_NAME=""
@@ -101,6 +103,7 @@ while [ $# -gt 0 ]; do
     --host)            HOST="$2"; shift 2 ;;
     --project)         PROJECT="$2"; shift 2 ;;
     --github)          GITHUB="$2"; shift 2 ;;
+    --no-github)       NO_GITHUB=1; shift ;;
     --tag)             TAG="$2"; shift 2 ;;
     --ref)             REF="$2"; shift 2 ;;
     --package-name)    PACKAGE_NAME="$2"; shift 2 ;;
@@ -117,7 +120,8 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/local-config.sh"
 local_config_refuse_secrets || exit 1
 [ -n "$HOST" ]    || HOST="$(local_config_get GITLAB_HOST)"
 [ -n "$PROJECT" ] || PROJECT="$(local_config_get GITLAB_PROJECT)"
-[ -n "$GITHUB" ]  || GITHUB="$(local_config_get GITHUB_REPO)"
+[ "$NO_GITHUB" = "1" ] && GITHUB=""
+[ "$NO_GITHUB" = "1" ] || [ -n "$GITHUB" ] || GITHUB="$(local_config_get GITHUB_REPO)"
 
 [ -n "$HOST" ]    || die "--host is required (or GITLAB_HOST in tools/release.env), e.g. gitlab.example.com"
 [ -n "$PROJECT" ] || die "--project is required (or GITLAB_PROJECT in tools/release.env): a numeric ID or a namespace path"
