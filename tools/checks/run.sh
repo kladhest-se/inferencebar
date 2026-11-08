@@ -55,14 +55,18 @@ for entry in "${SUITES[@]}"; do
   fi
 
   script="$TESTS_DIR/$suite.sh"
-  if [ ! -x "$script" ]; then
-    skipped=$((skipped + 1))
-    skip_notes="$skip_notes$suite: not executable, so it was not run"$'\n'
+  # A suite that is simply missing is a failure, not a skip: a check that
+  # quietly does not run reads as a pass. (It used to be skipped when its exec
+  # bit was lost -- zip extraction does that -- so `check.sh` reported "checks
+  # passed" having run nothing.) Run through bash, so the bit does not matter.
+  if [ ! -f "$script" ]; then
+    failed=$((failed + 1))
+    fail_notes="$fail_notes$suite: $script is missing"$'\n'
     continue
   fi
 
   head1 "$suite — $blurb"
-  "$script"
+  bash "$script"
   status=$?
 
   case "$status" in

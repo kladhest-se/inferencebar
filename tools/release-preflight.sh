@@ -20,7 +20,7 @@ set -uo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/lib/common.sh"
 source "$TOOLS_DIR/lib/local-config.sh"
 
-cd "$APP"
+cd "$APP" || exit 1
 problems=0
 bad() { fail "$*"; problems=$((problems + 1)); }
 

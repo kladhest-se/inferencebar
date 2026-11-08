@@ -42,6 +42,15 @@ LOCAL_ONLY=("tools/release.env" "*.p12" "*.pem" "*.key" "*.mobileprovision" ".en
 
 fails=0
 
+# A file or directory git ignores -- Finder's .DS_Store, an editor's .vscode/ --
+# clutters the folder but not the repository, and this suite is about the
+# repository. Without this, merely opening the folder in Finder made the
+# check (and so `make release-all`) fail.
+ignored_by_git() {
+  git -C "$APP" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && git -C "$APP" check-ignore -q -- "$1"
+}
+
 for file in "${REQUIRED[@]}"; do
   if [ ! -e "$APP/$file" ]; then
     fail "missing $file"
@@ -51,6 +60,7 @@ done
 
 while IFS= read -r entry; do
   name="$(basename "$entry")"
+  ignored_by_git "$name" && continue
   allowed=0
   for permitted in "${ROOT_FILES_ALLOWED[@]}"; do
     [ "$name" = "$permitted" ] && allowed=1
@@ -63,6 +73,7 @@ done < <(find "$APP" -maxdepth 1 -type f)
 
 while IFS= read -r entry; do
   name="$(basename "$entry")"
+  ignored_by_git "$name" && continue
   allowed=0
   for permitted in "${ROOT_DIRS_ALLOWED[@]}"; do
     [ "$name" = "$permitted" ] && allowed=1

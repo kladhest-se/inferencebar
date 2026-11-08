@@ -15,8 +15,10 @@ LOCAL_CONFIG="${INFERENCEBAR_RELEASE_ENV:-${TOOLS_DIR:-$(cd "$(dirname "${BASH_S
 # local_config_get KEY  -> the value, or nothing
 local_config_get() {
   [ -f "$LOCAL_CONFIG" ] || return 0
-  grep -E "^[[:space:]]*$1[[:space:]]*=" "$LOCAL_CONFIG" 2>/dev/null | tail -1 \
-    | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"(.*)"$/\1/' || true
+  # tr first: BSD sed (macOS) does not understand \r. Then: drop the key,
+  # an inline "  # comment", trailing blanks, and one layer of quotes.
+  grep -E "^[[:space:]]*$1[[:space:]]*=" "$LOCAL_CONFIG" 2>/dev/null | tail -1 | tr -d '\r' \
+    | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+#.*$//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/' || true
 }
 
 # local_config_refuse_secrets  -> exits 1 if the file looks like it holds one
