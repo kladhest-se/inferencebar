@@ -24,7 +24,7 @@ REQUIRED=(
 # root to what has to be there (Makefile for `make`, .gitignore for git,
 # README.md for GitHub, CHANGELOG.md as the second thing anyone opens) is
 # what this loop is for.
-ROOT_FILES_ALLOWED=("Package.swift" "Makefile" "README.md" "CHANGELOG.md" "LICENSE" "LICENSE.md" ".gitignore")
+ROOT_FILES_ALLOWED=("Package.swift" "Makefile" "README.md" "CHANGELOG.md" "LICENSE" "LICENSE.md" ".gitignore" ".gitlab-ci.yml")
 ROOT_DIRS_ALLOWED=("Sources" "Tests" "Assets" "work" "public-web" "bin" "tools" ".git" ".github")
 # .github stays on the allowed-but-not-required list rather than being
 # dropped outright: CI/CD is coming back at a later stage (see

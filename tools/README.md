@@ -134,6 +134,15 @@ Troubleshooting what the status codes mean:
 | `401` | expired or mistyped token, or a token without the `api` scope |
 | `422` creating the Release | the tag doesn't exist yet — pass `--ref` |
 
+## Continuous integration
+
+`.gitlab-ci.yml` runs `tools/check.sh --no-build` (layout + privacy) on every push
+and merge request, on any GitLab runner with Docker. It does not build the app:
+that needs macOS, so run `make check` and `make macos-test` on your Mac. A
+commented-out job at the bottom of the file shows how to add a macOS runner.
+Your own host and project names are only checked where `tools/release.env`
+exists, so CI runs the generic rules only.
+
 ## Checks
 
 ```sh

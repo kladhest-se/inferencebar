@@ -1,0 +1,34 @@
+# Runs the repository checks that need no Swift toolchain, on every push and
+# merge request: layout (the repo has what it should, nothing loose) and
+# privacy (no token, signing identity, private host or home path in the
+# tree). It is the same `tools/check.sh --no-build` you run before pushing,
+# so the scan still happens when someone forgets.
+#
+# Needs any GitLab runner with the Docker executor. It does not build or test
+# the app: that needs macOS and Swift 6 (`make check` and `make macos-test`
+# on a Mac). The privacy suite's check of your own host and project names is
+# skipped here, because those live in the gitignored tools/release.env.
+
+stages:
+  - check
+
+repo-checks:
+  stage: check
+  image: debian:stable-slim
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+  script:
+    - bash tools/check.sh --no-build
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"
+
+# A macOS build job, if you register a runner on a Mac (tag it `macos`):
+#
+# swift-build-and-test:
+#   stage: check
+#   tags: [macos]
+#   script:
+#     - tools/check.sh
