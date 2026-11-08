@@ -10,6 +10,7 @@ supplied at run time — see [Local settings](#local-settings).
 
 ```
 check.sh                      pre-push checks: layout, privacy, build
+release-preflight.sh          is a release ready? checked before anything is built
 upload-release-assets.sh      attach built files to a tag's GitLab (and GitHub) Release
 bootstrap.sh                  what this machine is missing — reported, never installed
 release.env.example           the machine-local settings file, with placeholders
@@ -62,27 +63,55 @@ project are checked automatically; add more with `PRIVATE_STRINGS`). Findings
 are reported as `file:line` and the rule — never the matching text, so the check
 itself cannot leak what it found.
 
-## Attaching built files to a release
+## Releasing
+
+One command does the whole thing:
 
 ```sh
-make macos-package NOTARY_PROFILE=inferencebar     # outputs/InferenceBar-X.Y-macos.dmg
-git tag v0.7 && git push origin v0.7               # or pass --ref instead of pushing the tag first
-
-make release-upload TAG=v0.7 REF=main              # everything in outputs/
-# or directly:
-tools/upload-release-assets.sh --tag v0.7 --ref main --dir outputs/
-tools/upload-release-assets.sh --tag v0.7 --ref main --dir outputs/ --dry-run
+git push origin main && git push mirror main      # the Release is created from this commit
+make release-all NOTARY_PROFILE=inferencebar
 ```
 
-With `release.env` filled in, `--host`, `--project` and `--github` are optional;
-a flag always wins over the file. For a Release whose tag doesn't exist on the
-remote yet, `--ref` (a branch or commit) is required — GitLab otherwise answers
-`422 Ref is not specified`.
+In order, `release-all`:
 
-It uploads each file to GitLab's generic package registry, then attaches it as
-an asset link on the Release so it appears under the Release's Assets list; with
-a GitHub repo configured it attaches the same files to that Release too. It
-creates a Release if there is none, and re-running after a partial failure is
+1. **`release-preflight`** — fails in a second, before the notarization wait, if
+   anything is wrong: the tag disagrees with the app version, `CHANGELOG.md` has
+   no section for it, the tree has uncommitted changes, HEAD isn't on every git
+   remote, `NOTARY_PROFILE` is unset (a non-notarized build trips Gatekeeper for
+   every downloader; `ALLOW_UNNOTARIZED=1` overrides), a token is missing, or
+   `tools/release.env` isn't filled in. Every problem is listed, not just the first.
+2. **`tools/check.sh --no-build`** — layout and privacy suites.
+3. **`make macos-package`** — the signed, notarized, stapled DMG.
+4. **`make macos-release`** — the signed, notarized ZIP (`ZIP=0` skips it).
+5. **`make release-upload`** — attaches this version's DMG, ZIP and checksums to
+   the Release on GitLab, and on GitHub when `GITHUB_REPO` is set.
+
+`TAG` defaults to `v<version>` (the app's update check compares the two) and
+`REF` to the current branch. `DRY=1` makes the upload step say what it would do.
+`release-all` pushes nothing itself: it creates the Release from `REF` on the
+remote, which is why preflight wants your commits pushed first.
+
+The steps also run on their own, e.g. when a notarization failed and you only
+need to redo the upload:
+
+```sh
+make release-preflight
+make release-upload TAG=v0.7 REF=main          # stages only this version's files
+tools/upload-release-assets.sh --tag v0.7 --ref main --dir some/dir --dry-run
+```
+
+`release-upload` copies only `outputs/InferenceBar-<version>-macos.*` into
+`work/release/` first. `outputs/` keeps older releases around, and uploading the
+whole directory would attach them to the new Release.
+
+With `release.env` filled in, `--host`, `--project` and `--github` are optional
+on the script; a flag always wins over the file. For a Release whose tag doesn't
+exist on the remote yet, `--ref` (a branch or commit) is required — GitLab
+otherwise answers `422 Ref is not specified`.
+
+The script uploads each file to GitLab's generic package registry, then attaches
+it as an asset link on the Release so it appears under the Release's Assets list.
+It creates a Release if there is none, and re-running after a partial failure is
 safe on both sides. Files upload under their basename, and two files sharing a
 basename are refused before anything is uploaded.
 

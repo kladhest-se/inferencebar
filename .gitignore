@@ -7,6 +7,7 @@ work/clang-cache/
 work/swift-cache/
 work/package/
 work/dmg/
+work/release/
 
 # macOS
 .DS_Store

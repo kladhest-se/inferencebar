@@ -37,7 +37,7 @@ APP_DEST ?= /Applications
 # every invocation picks it up without repeating it.
 NOTARY_PROFILE ?=
 
-.PHONY: all help clean macos-build macos-run macos-open macos-test macos-archive macos-app macos-install macos-release macos-package signing-identities notarize-help notarize-setup cli install-cli check tools-test release-upload
+.PHONY: all help clean macos-build macos-run macos-open macos-test macos-archive macos-app macos-install macos-release macos-package signing-identities notarize-help notarize-setup cli install-cli check tools-test release-preflight release-stage release-upload release-all
 
 all:
 	$(CACHE_ENV) swift build -c release $(SWIFT_FLAGS)
@@ -60,7 +60,9 @@ help:
 	@echo "  make notarize-setup  Find the team ID and Apple ID and set up notarization"
 	@echo "  make check           Pre-push checks: layout, no secrets in the tree, build"
 	@echo "  make tools-test      Run every check suite in tools/checks"
-	@echo "  make release-upload TAG=v0.7 [REF=main]  Attach outputs/ to that tag's Release"
+	@echo "  make release-all     Whole release: preflight, checks, DMG + ZIP (notarized), upload"
+	@echo "  make release-upload  Attach this version's DMG/ZIP to its Release (GitLab, GitHub)"
+	@echo "  make release-preflight  Check a release is ready, before building anything"
 	@echo ""
 	@echo "  Signing identity : $(CODESIGN_IDENTITY)"
 	@echo "  Notary profile   : $(if $(NOTARY_PROFILE),$(NOTARY_PROFILE),(not set -- macos-package/macos-release will sign but not notarize))"
@@ -225,7 +227,7 @@ notarize-help:
 	@echo "the wrong one gets picked."
 
 clean:
-	rm -rf .build work/package work/dmg work/test-app work/swift-cache work/clang-cache
+	rm -rf .build work/package work/dmg work/release work/test-app work/swift-cache work/clang-cache
 	@echo "Removed Swift build and app packaging products"
 
 # work/swift-cache and work/clang-cache hold Clang/SwiftPM module caches
@@ -241,12 +243,43 @@ clean:
 # Release tooling lives in tools/ -- see tools/README.md. None of it knows
 # where your GitLab is: that comes from tools/release.env, which is
 # gitignored, and tokens come from GITLAB_TOKEN / GITHUB_TOKEN.
+#
+#   make release-all NOTARY_PROFILE=inferencebar
+#
+# TAG defaults to v<version> (the app's update check compares the two) and
+# REF to the current branch, which is what a tag that is not on the remote
+# yet gets created from. ZIP=0 skips the ZIP and ships only the DMG;
+# DRY=1 makes the upload step say what it would do instead of doing it.
+TAG ?= v$(VERSION)
+REF ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null)
+RELEASE_STAGE := work/release
+ZIP ?= 1
+
 check:
 	tools/check.sh
 
 tools-test:
 	bash tools/checks/run.sh
 
-release-upload:
-	@test -n "$(TAG)" || { echo "usage: make release-upload TAG=v0.7 [REF=main]"; exit 1; }
-	tools/upload-release-assets.sh --tag "$(TAG)" $(if $(REF),--ref "$(REF)") --dir outputs/
+release-preflight:
+	@TAG="$(TAG)" VERSION="$(VERSION)" NOTARY_PROFILE="$(NOTARY_PROFILE)" tools/release-preflight.sh
+
+# Only THIS version's artifacts. outputs/ keeps older releases around, and
+# uploading the whole directory would attach 0.6's files to 0.7's Release.
+release-stage:
+	rm -rf "$(RELEASE_STAGE)"
+	mkdir -p "$(RELEASE_STAGE)"
+	@ls outputs/InferenceBar-$(VERSION)-macos.* >/dev/null 2>&1 || { echo "error: no outputs/InferenceBar-$(VERSION)-macos.* -- run 'make macos-package' first"; exit 1; }
+	cp outputs/InferenceBar-$(VERSION)-macos.* "$(RELEASE_STAGE)/"
+
+release-upload: release-stage
+	tools/upload-release-assets.sh --tag "$(TAG)" $(if $(REF),--ref "$(REF)") $(if $(DRY),--dry-run) --dir "$(RELEASE_STAGE)"
+
+# Preflight first, so a missing token or an unpushed commit fails in a second
+# rather than after the notarization wait. Does not push anything: the
+# Release is created from REF on the remote, so push your commits first.
+release-all: release-preflight
+	tools/check.sh --no-build
+	$(MAKE) macos-package
+	@if [ "$(ZIP)" != "0" ]; then $(MAKE) macos-release; fi
+	$(MAKE) release-upload

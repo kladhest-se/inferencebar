@@ -56,6 +56,7 @@ make install-cli    # Build the CLI and install it on your PATH as `inference`
 make help           # Show all available commands
 make clean          # Remove local build products
 make check          # Pre-push checks: layout, no secrets in the tree, build
+make release-all    # Preflight, checks, notarized DMG + ZIP, upload to the Release
 ```
 
 Release tooling (pre-push checks, attaching built files to a GitLab/GitHub

@@ -33,7 +33,7 @@ ROOT_DIRS_ALLOWED=("Sources" "Tests" "Assets" "work" "public-web" "bin" "tools" 
 
 # Anything a build produces. If the repository can generate it, .gitignore
 # must cover it.
-GENERATED=(".build/" "outputs/" "work/clang-cache/" "work/swift-cache/" "work/package/" "work/dmg/")
+GENERATED=(".build/" "outputs/" "work/clang-cache/" "work/swift-cache/" "work/package/" "work/dmg/" "work/release/")
 
 # Machine-local files that must never be committed. privacy.sh checks the
 # tracked tree for secrets; this checks the .gitignore that keeps the
@@ -110,7 +110,7 @@ fi
 # `make help` and gets a target that does nothing, or reads the README and
 # gets "No rule to make target".
 VERBS=(macos-build macos-run macos-open macos-test macos-app macos-install
-       macos-release macos-package macos-archive signing-identities check)
+       macos-release macos-package macos-archive signing-identities check release-all)
 for verb in "${VERBS[@]}"; do
   grep -qE "^${verb}:" "$APP/Makefile" || {
     fail "Makefile has no $verb target"
