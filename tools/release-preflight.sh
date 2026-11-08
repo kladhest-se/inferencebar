@@ -100,8 +100,8 @@ fi
 # --- Signing identity ------------------------------------------------------------
 # macos-package signs with ad-hoc ("-") when no Developer ID Application
 # certificate is in the keychain, and Apple rejects an ad-hoc build at
-# notarization -- after the ten-minute build. Notarization also needs the
-# credentials saved by `make notarize-setup`.
+# notarization -- after the ten-minute build. (Whether the notarytool profile
+# exists is not checked: it can only be tested over the network.)
 if [ "$(uname -s)" = "Darwin" ]; then
   identity="${CODESIGN_IDENTITY:-}"
   if [ -z "$identity" ] || [ "$identity" = "-" ]; then
@@ -112,16 +112,6 @@ if [ "$(uname -s)" = "Darwin" ]; then
     fi
   else
     ok "signing with a Developer ID Application certificate"
-  fi
-  if [ -n "${NOTARY_PROFILE:-}" ]; then
-    # Where notarytool keeps a saved profile. Looked up locally, no network.
-    if security find-generic-password -s "com.apple.gke.notary.tool.saved-creds.$NOTARY_PROFILE" >/dev/null 2>&1; then
-      ok "notarytool credentials '$NOTARY_PROFILE' are in the keychain"
-    else
-      # A warning, not a failure: the keychain item name is notarytool's
-      # own and can differ between Xcode versions.
-      warn "could not find notarytool credentials '$NOTARY_PROFILE' in the keychain; if notarization says 'No Keychain password item', run: make notarize-setup NOTARY_PROFILE=$NOTARY_PROFILE"
-    fi
   fi
 fi
 
