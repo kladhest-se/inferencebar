@@ -12,6 +12,8 @@ InferenceBar is a native SwiftUI menu-bar application for downloading, configuri
 - Local chat with streaming, Markdown, code highlighting, regenerate and edit-and-resend, a context-window usage indicator, text and image attachments (drop, pick, or paste a screenshot for vision-capable models), cancellation, and saved conversations — exportable to Markdown.
 - Optional web search (against your own SearXNG instance) and single-page fetching, each toggleable per chat.
 - Optional TLS (llama.cpp), a keychain-stored API key, crash notifications, opt-in auto-restart, and a global keyboard shortcut for the Chat window.
+- OpenCode integration: coding presets sync to OpenCode as a local provider (the Settings card shows what was synced), and "Open OpenCode in a project" starts your coding profile and opens Terminal in a folder you pick.
+- A built-in speed test for the running profile (prompt-reading and writing tokens per second), a free-disk-space check before large downloads, and an in-app "Download and open" for new releases (SHA-256 checked).
 - Optional `inference` command-line tool (`inference ask "..."`) for scripting against whatever profile is currently running, installable from Settings or `make install-cli`.
 
 ## Requirements for running the app

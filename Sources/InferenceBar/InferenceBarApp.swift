@@ -264,6 +264,10 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
             let update = menuItem("Update available: \(tag)", action: #selector(openAvailableUpdate), systemImage: "arrow.down.circle.fill")
             update.representedObject = tag
             menu.addItem(update)
+            let download = menuItem(store.isInstallingUpdate ? "Downloading update…" : "Download and open \(tag)", action: #selector(downloadAvailableUpdate), systemImage: "square.and.arrow.down")
+            download.representedObject = tag
+            download.isEnabled = !store.isInstallingUpdate
+            menu.addItem(download)
             menu.addItem(.separator())
         }
         // Only the currently selected profile in Profiles' own editor shows
@@ -496,6 +500,10 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
         let tag = (sender.representedObject as? String) ?? ""
         let encoded = tag.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? tag
         NSWorkspace.shared.open(URL(string: "https://github.com/kladhest-se/inferencebar/releases/tag/\(encoded)")!)
+    }
+    @objc private func downloadAvailableUpdate(_ sender: NSMenuItem) {
+        guard let tag = sender.representedObject as? String else { return }
+        Task { await store.downloadAndOpenUpdate(tag: tag) }
     }
     @objc private func stopServer() { store.stop() }
     @objc private func quitApp() { NSApp.terminate(nil) }

@@ -327,6 +327,7 @@ struct ProfileEditor: View {
             }
             if store.runningProfileID == profile.id {
                 Section("Runtime health") { RuntimeHealthPanel(health: store.runtimeHealth, lifecycle: store.serverLifecycle) }
+                Section("Speed test") { SpeedTestPanel() }
             }
             Section("Identity") {
                 TextField("Profile name", text: $profile.name)
@@ -491,6 +492,54 @@ private func contextUsageTint(_ level: ContextUsageLevel) -> Color {
     }
 }
 
+/// Measures the running profile on demand: how fast it reads a long prompt
+/// and how fast it writes. Shown under "Runtime health" in the profile editor.
+private struct SpeedTestPanel: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Button(store.isRunningSpeedTest ? "Testing…" : "Run speed test") {
+                    Task { await store.runSpeedTest() }
+                }
+                .disabled(store.isRunningSpeedTest || store.serverLifecycle != .running)
+                if store.isRunningSpeedTest { ProgressView().controlSize(.small) }
+                Spacer()
+            }
+            if let error = store.speedTestError {
+                Text(error).font(.caption).foregroundStyle(.orange).lineLimit(4)
+            }
+            if let summary = store.speedTestSummary {
+                Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 6) {
+                    GridRow {
+                        result("Reading the prompt", summary.promptTokensPerSecond, estimated: summary.estimated)
+                        result("Writing", summary.generationTokensPerSecond, estimated: summary.estimated)
+                    }
+                }
+                Text(detail(for: summary)).font(.caption).foregroundStyle(.secondary)
+            } else if store.speedTestError == nil {
+                Text("Sends two short requests to the running server: one long prompt to time how fast it is read, and one story to time how fast it is written. Nothing is saved to your chats.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func detail(for summary: SpeedTestSummary) -> String {
+        var text = "\(summary.profileName) · prompt of about \(summary.promptTokens.formatted()) tokens · \(summary.finishedAt.formatted(date: .omitted, time: .shortened))"
+        if summary.estimated { text += " · approximate: this server did not report its own timings" }
+        return text
+    }
+
+    private func result(_ title: String, _ value: Double?, estimated: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label(title, systemImage: "gauge.with.dots.needle.67percent").font(.caption).foregroundStyle(.secondary)
+            Text(value.map { (estimated ? "≈ " : "") + String(format: "%.1f tok/s", $0) } ?? "—")
+                .font(.body.monospacedDigit()).lineLimit(1)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 private struct RuntimeHealthPanel: View {
     let health: RuntimeHealth
     let lifecycle: ServerLifecycle
@@ -599,8 +648,6 @@ struct GlobalServerSettingsView: View {
     @State private var webSearchTestFailed = false
     @State private var cliInstallResult: String?
     @State private var cliInstallFailed = false
-    @State private var openCodeSyncResult: String?
-    @State private var openCodeSyncFailed = false
 
     var body: some View {
         @Bindable var store = store
@@ -696,6 +743,10 @@ struct GlobalServerSettingsView: View {
                                 // instead of one more page to search from.
                                 Link("Update \(tag) is available", destination: URL(string: "https://github.com/kladhest-se/inferencebar/releases/tag/\(tag)")!)
                                     .fontWeight(.semibold)
+                                Button(store.isInstallingUpdate ? "Downloading…" : "Download and open") {
+                                    Task { await store.downloadAndOpenUpdate(tag: tag) }
+                                }
+                                .disabled(store.isInstallingUpdate)
                             } else if let error = store.updateCheckError {
                                 Text("Last check failed: \(error)").font(.caption).foregroundStyle(.orange).lineLimit(2)
                             } else if let date = store.lastUpdateCheck {
@@ -704,6 +755,9 @@ struct GlobalServerSettingsView: View {
                             Spacer()
                             if store.isCheckingForUpdates { ProgressView().controlSize(.small) }
                             Button("Check now") { Task { await store.checkForUpdates() } }.disabled(store.isCheckingForUpdates)
+                        }
+                        if let status = store.updateInstallStatus {
+                            Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(4)
                         }
                     }
                 }
@@ -838,16 +892,21 @@ struct GlobalServerSettingsView: View {
                         : "OpenCode opens with this model selected; every synced profile below is still available in its own /models picker.")
                         .font(.caption).foregroundStyle(.secondary)
                     Divider()
-                    HStack {
-                        if let openCodeSyncResult {
-                            Label(openCodeSyncResult, systemImage: openCodeSyncFailed ? "xmark.circle.fill" : "checkmark.circle.fill")
-                                .font(.caption).foregroundStyle(openCodeSyncFailed ? .red : .green).lineLimit(3)
-                        } else {
-                            Text("Every profile added from a \"Coding\" preset syncs automatically. Use this after editing one by hand, or to sync presets added before this existed.")
+                    HStack(alignment: .top) {
+                        openCodeStatusView
+                        Spacer()
+                        Button("Sync now") { syncOpenCode() }
+                    }
+                    Divider()
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Open OpenCode in a project").fontWeight(.medium)
+                            Text("Starts your default coding profile if no server is running, then opens Terminal in the folder you choose with OpenCode already pointed at it.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Sync now") { syncOpenCode() }
+                        Button("Choose folder…") { launchOpenCode() }
+                            .disabled(!installedDependencies.contains(BrewDependency.opencode.id) || codingProfiles.isEmpty)
                     }
                 }
             }.padding(28).frame(maxWidth: 900)
@@ -860,10 +919,43 @@ struct GlobalServerSettingsView: View {
     /// Profiles eligible for OpenCode's default-model picker above --
     /// only ones that actually get synced (see AppStore.syncCodingProfilesToOpenCode),
     /// so the picker never offers a profile OpenCode wouldn't recognize.
-    private var codingProfiles: [ServerProfile] {
-        store.profiles.filter { profile in
-            ProfilePreset.all.contains { $0.matches(profile) && $0.useCases.contains(.coding) }
+    private var codingProfiles: [ServerProfile] { store.codingPresetProfiles }
+
+    /// What the last sync did, from the store, so it also shows the result of
+    /// the automatic sync that runs when a coding preset is added. Before any
+    /// sync it says what would be synced.
+    @ViewBuilder private var openCodeStatusView: some View {
+        if let status = store.openCodeSyncStatus {
+            VStack(alignment: .leading, spacing: 3) {
+                Label(status.message, systemImage: status.isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .font(.caption).foregroundStyle(status.isSuccess ? Color.green : Color.red).lineLimit(4)
+                if status.isSuccess && !status.models.isEmpty {
+                    Text(status.models.joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+                }
+                Text("Last sync \(status.date.formatted(date: .omitted, time: .shortened))").font(.caption2).foregroundStyle(.tertiary)
+            }
+        } else if codingProfiles.isEmpty {
+            Text("No profile from a \"Coding\" preset yet. Add one (Manage → Add preset) and it syncs to OpenCode automatically.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Not synced yet this session. \(codingProfiles.count) coding profile\(codingProfiles.count == 1 ? "" : "s") will be written to OpenCode:")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(codingProfiles.map(\.name).joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
+            }
         }
+    }
+
+    private func launchOpenCode() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open OpenCode Here"
+        panel.message = "Choose the project folder to open OpenCode in."
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        store.launchOpenCode(in: folder)
     }
 
     private var portBinding: Binding<String> {
@@ -959,20 +1051,9 @@ struct GlobalServerSettingsView: View {
     }
 
     private func syncOpenCode() {
-        switch store.syncCodingProfilesToOpenCode() {
-        case .synced(let path):
-            openCodeSyncFailed = false
-            openCodeSyncResult = "Synced to \(path)."
-        case .noCodingProfiles:
-            openCodeSyncFailed = true
-            openCodeSyncResult = "No profiles from a \"Coding\" preset are added yet — add one first (Manage → Add preset)."
-        case .openCodeNotSetUp:
-            openCodeSyncFailed = true
-            openCodeSyncResult = "Install OpenCode above (or run it once) before syncing."
-        case .failed(let reason):
-            openCodeSyncFailed = true
-            openCodeSyncResult = "Couldn't write OpenCode's config: \(reason)"
-        }
+        // The outcome is recorded on the store (openCodeSyncStatus), which
+        // openCodeStatusView shows.
+        store.syncCodingProfilesToOpenCode()
     }
 
     private func install(_ dependency: BrewDependency) {

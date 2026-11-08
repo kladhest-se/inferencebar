@@ -3,7 +3,13 @@
 ## 0.7.1
 
 - Fixed: a downloaded coding preset was not recognised as one, so the OpenCode card said "No profiles from a Coding preset" and "Add all presets" could add duplicates
+- OpenCode card: shows what the last sync did (models, config path, time), including the automatic sync when a coding preset is added; a failed automatic sync is now reported instead of silent
+- Added "Open OpenCode in a project": starts the default coding profile if no server is running and opens Terminal in a chosen folder, waiting for the server to be ready
+- Added a speed test in the profile editor (prompt-reading and writing tokens/s of the running profile)
+- Downloads check free disk space first and refuse, with an explanation, when the file plus a 5 GB reserve will not fit
+- Added "Download and open" for updates (Settings and the menu bar): fetches the release DMG, checks its SHA-256, opens it
 - `tools/`: `make release-upload GITLAB_ONLY=1` skips GitHub when only GitLab needs the files
+- `tools/`: preflight checks that GitLab and GitHub accept the tokens before building; a GitHub failure no longer stops the GitLab upload; `KEEP_DIR=` keeps a copy of each release's files; `.gitlab-ci.yml` runs the layout and privacy checks on every push
 
 ## 0.7
 

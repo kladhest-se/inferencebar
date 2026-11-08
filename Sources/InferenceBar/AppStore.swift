@@ -290,6 +290,16 @@ final class AppStore {
     }
     var availableUpdateTag: String? { didSet { NotificationCenter.default.post(name: .inferenceServerLifecycleChanged, object: nil) } }
     var lastUpdateCheck: Date?
+    // Progress of "Download and open" for an available update (see
+    // downloadAndOpenUpdate in AppStoreTools.swift).
+    var updateInstallStatus: String?
+    var isInstallingUpdate = false
+    // What the last OpenCode sync did, however it was triggered.
+    var openCodeSyncStatus: OpenCodeSyncStatus?
+    // Result of the latest speed test of the running profile.
+    var speedTestSummary: SpeedTestSummary?
+    var isRunningSpeedTest = false
+    var speedTestError: String?
     var updateCheckError: String?
     var isCheckingForUpdates = false
     var requestedSection: AppSection = .profiles
@@ -747,7 +757,7 @@ final class AppStore {
     /// mmproj file even after upgrading to a build that knows to fetch it.
     func addPresetStartingDownloadIfNeeded(_ preset: ProfilePreset) {
         addPreset(preset)
-        if preset.useCases.contains(.coding) { syncCodingProfilesToOpenCode() }
+        if preset.useCases.contains(.coding) { autoSyncCodingProfiles() }
         guard let ownerProfileID = profiles.last?.id else { return }
         let modelMissing = !preset.isAvailable(modelRoot: configuredModelRoot)
         let projectorMissing = !preset.hasProjectorAvailable(modelRoot: configuredModelRoot)
@@ -780,7 +790,7 @@ final class AppStore {
                 if !preset.hasProjectorAvailable(modelRoot: configuredModelRoot) {
                     enqueuePresetDownload(preset, ownerProfileID: existingOwnerID)
                 }
-                if preset.useCases.contains(.coding) { syncCodingProfilesToOpenCode() }
+                if preset.useCases.contains(.coding) { autoSyncCodingProfiles() }
                 continue
             }
             addPresetStartingDownloadIfNeeded(preset)
@@ -816,6 +826,34 @@ final class AppStore {
 
     @discardableResult
     func syncCodingProfilesToOpenCode() -> OpenCodeSyncOutcome {
+        let outcome = performOpenCodeSync()
+        let names = codingPresetProfiles.map(\.name)
+        let status: OpenCodeSyncStatus
+        switch outcome {
+        case .synced(let path):
+            let count = names.count
+            status = OpenCodeSyncStatus(kind: .synced, message: "Synced \(count) model\(count == 1 ? "" : "s") to \(path)", models: names, date: Date())
+        case .noCodingProfiles:
+            status = OpenCodeSyncStatus(kind: .noCodingProfiles, message: "No profiles from a \"Coding\" preset are added yet — add one first (Manage → Add preset).", models: [], date: Date())
+        case .openCodeNotSetUp:
+            status = OpenCodeSyncStatus(kind: .openCodeNotSetUp, message: "Install OpenCode above (or run it once) before syncing.", models: [], date: Date())
+        case .failed(let reason):
+            status = OpenCodeSyncStatus(kind: .failed, message: "Couldn't update OpenCode's config: \(reason)", models: [], date: Date())
+        }
+        openCodeSyncStatus = status
+        return outcome
+    }
+
+    /// The automatic sync after a coding preset is added. A failure here used
+    /// to vanish silently; it is now shown, because it means OpenCode will
+    /// not see the model that was just added.
+    private func autoSyncCodingProfiles() {
+        if case .failed(let reason) = syncCodingProfilesToOpenCode() {
+            errorMessage = "The coding profile was added, but OpenCode's config was not updated: \(reason)"
+        }
+    }
+
+    private func performOpenCodeSync() -> OpenCodeSyncOutcome {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: Self.openCodeConfigDirectory.path)
             || HomebrewRuntimeManager.isInstalled(.opencode, fileManager: fileManager) else { return .openCodeNotSetUp }
@@ -1098,6 +1136,16 @@ final class AppStore {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let path = "https://huggingface.co/\(model.id)/resolve/main/\(file)"
             guard let url = URL(string: path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path) else { throw URLError(.badURL) }
+            // Refuse up front when the disk cannot hold the file, instead of
+            // failing hours into a 30 GB download. Skipped when the size is unknown.
+            if let size = await Self.remoteContentLength(of: url) {
+                let present = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.int64Value ?? 0
+                if let message = DiskSpaceAdvisor.problem(requiredBytes: size, alreadyPresentBytes: present, availableBytes: DiskSpaceAdvisor.availableBytes(at: root)) {
+                    errorMessage = message
+                    downloadStatus = "Not enough disk space for \(file)"
+                    return
+                }
+            }
             let expectedChecksum = await repositorySHA256(modelID: model.id, file: file)
             defer { activeDownloader = nil; isDownloadPaused = false }
             var checksum: DownloadChecksumResult?
@@ -1177,6 +1225,18 @@ final class AppStore {
         }
     }
 
+    /// Size of a remote file from a HEAD request, nil when the server does
+    /// not say (the disk check is then skipped, never guessed).
+    private static func remoteContentLength(of url: URL) async -> Int64? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 15
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
+              http.expectedContentLength > 0 else { return nil }
+        return http.expectedContentLength
+    }
+
     private func repositorySHA256(modelID: String, file: String) async -> String? {
         let encoded = modelID.split(separator: "/").map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)! }.joined(separator: "/")
         guard let url = URL(string: "https://huggingface.co/api/models/\(encoded)?blobs=true"),
@@ -1235,6 +1295,11 @@ final class AppStore {
         if var job = downloadJobs[jobID] { job.total = repositoryTotal; downloadJobs[jobID] = job }
         let cacheRoot = mlxCacheRoot(modelID)
         let initialBytes = Self.directoryByteCount(cacheRoot)
+        if let message = DiskSpaceAdvisor.problem(requiredBytes: repositoryTotal, alreadyPresentBytes: initialBytes, availableBytes: DiskSpaceAdvisor.availableBytes(at: configuredModelRoot)) {
+            errorMessage = message
+            downloadStatus = "Not enough disk space for \(modelID)"
+            return
+        }
         downloadedBytes = min(initialBytes, downloadTotalBytes > 0 ? downloadTotalBytes : initialBytes)
 
         let task = Process()
