@@ -199,12 +199,18 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
     }
 
     private func statusImage(dotColor: NSColor, description: String) -> NSImage {
+        // The drawing handler can run off the main actor, so everything it
+        // needs from the store is read here first. (.labelColor stays a
+        // dynamic colour and still resolves per appearance when drawn.)
+        let iconStyle = store.menuBarIconStyle
+        let markColor: NSColor = switch iconStyle {
+        case .matchSystem: .labelColor
+        case .colour: store.appTheme.nsAccent
+        case .monochrome: .white
+        }
+        let boltColor: NSColor = iconStyle == .colour ? .white : .windowBackgroundColor
+        let hasUpdate = store.availableUpdateTag != nil
         let image = NSImage(size: StatusIconGeometry.size, flipped: false) { _ in
-            let markColor: NSColor = switch self.store.menuBarIconStyle {
-            case .matchSystem: .labelColor
-            case .colour: self.store.appTheme.nsAccent
-            case .monochrome: .white
-            }
 
             // Symbols are drawn aspect-fit: NSImage.draw(in:) stretches to
             // fill the rect, which squashed the bubble slightly.
@@ -234,11 +240,11 @@ final class InferenceBarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegat
                 .withSymbolConfiguration(.init(pointSize: 17, weight: .semibold).applying(.init(paletteColors: [markColor])))
             draw(bubble, fitting: StatusIconGeometry.bubble)
             let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: description)?
-                .withSymbolConfiguration(.init(pointSize: 9, weight: .bold).applying(.init(paletteColors: [self.store.menuBarIconStyle == .colour ? .white : NSColor.windowBackgroundColor])))
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .bold).applying(.init(paletteColors: [boltColor])))
             draw(bolt, fitting: StatusIconGeometry.bolt)
 
             drawBadge(StatusIconGeometry.statusDot, color: dotColor)
-            if self.store.availableUpdateTag != nil {
+            if hasUpdate {
                 drawBadge(StatusIconGeometry.updateDot, color: .systemOrange)
                 let arrow = NSImage(systemSymbolName: "arrow.down", accessibilityDescription: "InferenceBar update available")?
                     .withSymbolConfiguration(.init(pointSize: 5, weight: .heavy).applying(.init(paletteColors: [.white])))

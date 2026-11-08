@@ -932,10 +932,22 @@ final class DownloadAndModelTests: XCTestCase {
         XCTAssertEqual(aliases.count, Set(aliases).count, "duplicate alias among the M5 presets: \(aliases)")
     }
 
+    func testOpenCodeSyncNeverTreatsAnUnparseableConfigAsEmpty() throws {
+        XCTAssertEqual(try OpenCodeConfigSync.parseExisting(nil).get().count, 0, "no file yet is an empty config")
+        XCTAssertEqual(try OpenCodeConfigSync.parseExisting(Data("  \n".utf8)).get().count, 0, "a blank file is an empty config")
+        let ok = try OpenCodeConfigSync.parseExisting(Data(#"{"theme":"dark"}"#.utf8)).get()
+        XCTAssertEqual(ok["theme"] as? String, "dark")
+        for broken in ["// my settings\n{\"theme\":\"dark\"}", #"{"theme":"dark",}"#, "[1,2]", "{\"theme\":"] {
+            XCTAssertEqual(OpenCodeConfigSync.parseExisting(Data(broken.utf8)).failureValue, .notAJSONObject, "\(broken) would have been overwritten")
+        }
+    }
+
     func testOpenCodeCodingPresetsRunToolCallingTemplatesAndFitTheirMemoryTier() {
         // Weights + fp16 KV cache (48 layers x 4 KV heads x 128 dims x 2
         // tensors x 2 bytes = 98,304 bytes/token) must stay inside the
-        // ~75% of unified memory macOS lets the GPU wire.
+        // share of unified memory macOS lets the GPU wire. Published figures
+        // say roughly 75%; machines of 36 GB or less are often reported at
+        // two thirds, so the smaller tiers are held to that stricter limit.
         let tiers: [(id: String, weightsGB: Double, memoryGB: Double)] = [
             ("gguf-qwen3-coder-30b-q8-m5max-64", 32.5, 64),
             ("mlx-qwen3-coder-30b-8bit-m5max-64", 32.5, 64),
@@ -953,7 +965,8 @@ final class DownloadAndModelTests: XCTestCase {
                 XCTAssertTrue(preset.profile.flashAttention)
             }
             let kvGB = Double(preset.profile.contextSize) * 98_304 / 1_073_741_824
-            XCTAssertLessThan(tier.weightsGB + kvGB, tier.memoryGB * 0.75, "\(tier.id) would exceed the GPU wired-memory ceiling")
+            let ceiling = tier.memoryGB <= 36 ? tier.memoryGB * 2 / 3 : tier.memoryGB * 0.75
+            XCTAssertLessThan(tier.weightsGB + kvGB, ceiling, "\(tier.id) would exceed the GPU wired-memory ceiling")
         }
     }
 
@@ -1084,5 +1097,12 @@ final class DownloadAndModelTests: XCTestCase {
         let model = try! JSONDecoder().decode(HFModel.self, from: Data(json.utf8))
         XCTAssertNil(model.siblings)
         XCTAssertFalse(MultimodalProjector.hasProjectorSibling(among: (model.siblings ?? []).map(\.rfilename)))
+    }
+}
+
+private extension Result {
+    var failureValue: Failure? {
+        if case .failure(let error) = self { return error }
+        return nil
     }
 }

@@ -826,10 +826,18 @@ final class AppStore {
             return .init(alias: profile.alias, name: profile.name, contextSize: profile.contextSize, maximumOutputTokens: profile.effectiveMaximumOutputTokens)
         }
         guard !codingProfiles.isEmpty else { return .noCodingProfiles }
-        var existing: [String: Any] = [:]
-        if let data = try? Data(contentsOf: Self.openCodeConfigURL),
-           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            existing = parsed
+        // A file that exists but can't be read or parsed is left untouched:
+        // treating it as empty would overwrite the user's whole config.
+        var existingData: Data?
+        if fileManager.fileExists(atPath: Self.openCodeConfigURL.path) {
+            do { existingData = try Data(contentsOf: Self.openCodeConfigURL) }
+            catch { return .failed("Could not read \(Self.openCodeConfigURL.path): \(error.localizedDescription). It was left unchanged.") }
+        }
+        let existing: [String: Any]
+        switch OpenCodeConfigSync.parseExisting(existingData) {
+        case .success(let object): existing = object
+        case .failure:
+            return .failed("\(Self.openCodeConfigURL.path) is not a plain JSON object (comments or a trailing comma?), so it was left unchanged. Fix or move it, then sync again.")
         }
         let apiKey = networkSettings.authenticationEnabled ? "{env:INFERENCE_API_KEY}" : "local"
         let baseURL = "\(networkSettings.baseURL(runtime: .llamaCPP)?.absoluteString ?? "http://127.0.0.1:\(networkSettings.port)")/v1"

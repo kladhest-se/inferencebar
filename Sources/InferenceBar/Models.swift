@@ -762,9 +762,29 @@ enum OpenCodeConfigSync {
         let maximumOutputTokens: Int
     }
 
+    /// Reads an existing opencode.json. A missing or blank file is an
+    /// empty config; anything else must be a top-level JSON object. A file
+    /// that is not (comments, trailing commas, a half-written save, an
+    /// array) is reported rather than treated as empty, because the caller
+    /// would otherwise overwrite everything the user had in it.
+    static func parseExisting(_ data: Data?) -> Result<[String: Any], ExistingConfigError> {
+        guard let data else { return .success([:]) }
+        if String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .success([:])
+        }
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .failure(.notAJSONObject)
+        }
+        return .success(object)
+    }
+
+    enum ExistingConfigError: Error, Equatable {
+        case notAJSONObject
+    }
+
     /// Builds the merged config, given whatever top-level JSON object
     /// already existed in opencode.json (an empty dictionary if the file
-    /// didn't exist yet or failed to parse) and the profiles to expose.
+    /// didn't exist yet; see parseExisting) and the profiles to expose.
     /// baseURL should already include the "/v1" suffix OpenCode's
     /// openai-compatible provider expects.
     /// defaultModelAlias, when set, becomes opencode.json's top-level
@@ -1283,7 +1303,7 @@ struct ProfilePreset: Identifiable {
             title: "Qwen 2.5 Coder 7B · Q4_K_M",
             hardware: "Mac mini / MacBook Air · 8 GB",
             summary: "Entry-level coding preset with a conservative 4K context and limited agent headroom",
-            profile: ServerProfile(name: "Qwen 2.5 Coder 7B · 8 GB Mac", modelPath: "~/ai-models/qwen2.5-coder-7b-instruct-q4_k_m.gguf", alias: "qwen2.5-coder-7b", contextSize: 4096, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 256, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            profile: ServerProfile(name: "Qwen 2.5 Coder 7B · 8 GB Mac", modelPath: "~/ai-models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf", alias: "qwen2.5-coder-7b", contextSize: 4096, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 256, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
             ggufSourceModelID: "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF",
             useCases: [.coding]
         ),
@@ -1430,7 +1450,7 @@ struct ProfilePreset: Identifiable {
             title: "Phi-4 14B · Q4_K_M",
             hardware: "MacBook Air / Pro / mini · 16 GB",
             summary: "Strong reasoning per parameter; 16K native context",
-            profile: ServerProfile(name: "Recommended · Phi-4 14B · 16 GB", modelPath: "~/ai-models/Phi-4-Q4_K_M.gguf", alias: "phi-4", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            profile: ServerProfile(name: "Recommended · Phi-4 14B · 16 GB", modelPath: "~/ai-models/phi-4-Q4_K_M.gguf", alias: "phi-4", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 1024, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
             ggufSourceModelID: "bartowski/phi-4-GGUF",
             useCases: [.coding, .chat]
         ),
@@ -1720,8 +1740,8 @@ struct ProfilePreset: Identifiable {
             id: "gguf-qwen3-coder-30b-q4-32",
             title: "Qwen3 Coder 30B A3B · Q4_K_M · OpenCode",
             hardware: "MacBook Air / Pro M5 · 32 GB",
-            summary: "Agentic coder squeezed into 32 GB; about 18.6 GB of weights plus a 32K context",
-            profile: ServerProfile(name: "Qwen3 Coder 30B · M5 32 GB", modelPath: "~/ai-models/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", alias: "qwen3-coder-30b-q4-32", contextSize: 32768, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
+            summary: "Agentic coder squeezed into 32 GB; about 18.6 GB of weights plus a 16K context, which keeps it inside the default GPU memory limit",
+            profile: ServerProfile(name: "Qwen3 Coder 30B · M5 32 GB", modelPath: "~/ai-models/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", alias: "qwen3-coder-30b-q4-32", contextSize: 16384, parallel: 1, flashAttention: true, jinja: true, cacheRAM: 2048, reasoning: "", reasoningBudget: 0, reasoningFormat: "", reasoningPreserve: false),
             ggufSourceModelID: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
             useCases: [.coding, .systems]
         ),
