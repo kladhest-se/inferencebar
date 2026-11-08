@@ -764,7 +764,7 @@ enum OpenCodeConfigSync {
 
     /// Reads an existing opencode.json. A missing or blank file is an
     /// empty config; anything else must be a top-level JSON object. A file
-    /// that is not (comments, trailing commas, a half-written save, an
+    /// that is not (comments, a half-written save, an
     /// array) is reported rather than treated as empty, because the caller
     /// would otherwise overwrite everything the user had in it.
     static func parseExisting(_ data: Data?) -> Result<[String: Any], ExistingConfigError> {

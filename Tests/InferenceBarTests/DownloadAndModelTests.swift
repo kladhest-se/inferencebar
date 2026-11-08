@@ -965,7 +965,9 @@ final class DownloadAndModelTests: XCTestCase {
         XCTAssertEqual(try OpenCodeConfigSync.parseExisting(Data("  \n".utf8)).get().count, 0, "a blank file is an empty config")
         let ok = try OpenCodeConfigSync.parseExisting(Data(#"{"theme":"dark"}"#.utf8)).get()
         XCTAssertEqual(ok["theme"] as? String, "dark")
-        for broken in ["// my settings\n{\"theme\":\"dark\"}", #"{"theme":"dark",}"#, "[1,2]", "{\"theme\":"] {
+        // A trailing comma is deliberately not listed: Foundation accepts it, so
+        // that file is read completely and rewritten as valid JSON, losing nothing.
+        for broken in ["// my settings\n{\"theme\":\"dark\"}", "[1,2]", "{\"theme\":"] {
             XCTAssertEqual(OpenCodeConfigSync.parseExisting(Data(broken.utf8)).failureValue, .notAJSONObject, "\(broken) would have been overwritten")
         }
     }
