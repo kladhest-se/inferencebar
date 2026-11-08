@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+- Fixed: a downloaded coding preset was not recognised as one, so the OpenCode card said "No profiles from a Coding preset" and "Add all presets" could add duplicates
+- `tools/`: `make release-upload GITLAB_ONLY=1` skips GitHub when only GitLab needs the files
+
 ## 0.7
 
 - Fixed: empty "InferenceBar Settings" window appearing at launch
@@ -7,7 +12,6 @@
 - Added M5 MacBook presets: Qwen3.8 27B (vision), Qwen 3.6 35B Q8, GPT-OSS 120B
 - Added OpenCode coding presets: Qwen3 Coder 30B (32–64 GB, up to 128K context)
 - Added `tools/`: pre-push checks (incl. secrets/privacy scan) and release-asset upload
-- Fixed: a downloaded coding preset was not recognised as one, so the OpenCode card said "No profiles from a Coding preset" and "Add all presets" could add duplicates
 - Fixed: OpenCode sync overwrote an `opencode.json` it could not parse (e.g. with comments); it is now left untouched and the error shown
 - Fixed: Qwen 2.5 Coder 7B and Phi-4 presets used a filename that differs in case from the Hugging Face file
 - Qwen3 Coder 30B 32 GB preset: context 16K, to stay inside the default GPU memory limit

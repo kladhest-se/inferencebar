@@ -6,6 +6,8 @@ final class DownloadAndModelTests: XCTestCase {
     func testUpdatePolicyFindsNewestNumericGitHubTag() {
         XCTAssertEqual(AppUpdatePolicy.newestUpdate(tags: ["v0.4", "v0.6", "0.5.2", "nightly"], currentVersion: "0.5"), "v0.6")
         XCTAssertNil(AppUpdatePolicy.newestUpdate(tags: ["v0.4", "v0.5.0"], currentVersion: "0.5"))
+        XCTAssertEqual(AppUpdatePolicy.newestUpdate(tags: ["v0.7", "v0.7.1"], currentVersion: "0.7"), "v0.7.1", "a patch release is an update")
+        XCTAssertNil(AppUpdatePolicy.newestUpdate(tags: ["v0.7", "v0.7.1"], currentVersion: "0.7.1"))
         XCTAssertEqual(AppUpdatePolicy.checkInterval, 3600)
     }
 

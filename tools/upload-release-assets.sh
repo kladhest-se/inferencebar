@@ -9,7 +9,7 @@
 #   GITLAB_TOKEN=... tools/upload-release-assets.sh \
 #       --host gitlab.example.com \
 #       --project group/project \
-#       --tag v0.7 --ref main \
+#       --tag v0.7.1 --ref main \
 #       --dir outputs/
 #
 # Add --github to also attach the same files to that tag's Release on
@@ -19,12 +19,12 @@
 #       --host gitlab.example.com \
 #       --project group/project \
 #       --github owner/repo \
-#       --tag v0.7 --ref main \
+#       --tag v0.7.1 --ref main \
 #       --dir outputs/
 #
 # --host, --project and --github may be left off when tools/release.env
 # (gitignored; see tools/release.env.example) supplies them, so a release is
-# just:  tools/upload-release-assets.sh --tag v0.7 --ref main --dir outputs/
+# just:  tools/upload-release-assets.sh --tag v0.7.1 --ref main --dir outputs/
 # A flag always beats the file. This repository is public, which is why
 # those values live in a local file and not in this one.
 #

@@ -2,7 +2,7 @@
 # Everything that can be known to be wrong with a release BEFORE spending
 # ten minutes on notarization, checked up front.
 #
-#   TAG=v0.7 VERSION=0.7 NOTARY_PROFILE=inferencebar tools/release-preflight.sh
+#   TAG=v0.7.1 VERSION=0.7.1 NOTARY_PROFILE=inferencebar tools/release-preflight.sh
 #
 # Run by `make release-all` (which supplies the variables); runnable by hand.
 # Never touches git state or the network. Every problem is reported, not just
